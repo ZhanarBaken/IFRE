@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from urllib.parse import urlencode
 
 from app.core.config import settings
 from app.data.repositories import get_repository
@@ -227,6 +228,7 @@ async def demo_route_map(wialon_id: int, uwi: str):
 
 @app.get("/demo/batch-plan", response_class=HTMLResponse)
 async def demo_batch_plan(
+    request: Request,
     task_ids: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
@@ -235,8 +237,51 @@ async def demo_batch_plan(
     max_total_time_minutes: int = 480,
     max_detour_ratio: float = 1.3,
     grouping: bool | None = None,
+    embed: bool = False,
 ):
     try:
+        if not embed:
+            params = dict(request.query_params)
+            params["embed"] = "true"
+            query = urlencode(params)
+            src = f"{request.url.path}?{query}" if query else request.url.path
+            html = f"""
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <title>IFRE Batch Plan</title>
+    <style>
+      html, body {{ height: 100%; margin: 0; }}
+      body {{ font-family: "Segoe UI", Arial, sans-serif; background: #f8fafc; }}
+      #loading {{
+        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+        background: #f8fafc; color: #1f2933; z-index: 9999; flex-direction: column; gap: 10px;
+      }}
+      .spinner {{
+        width: 42px; height: 42px; border: 4px solid #cbd5e1; border-top-color: #2563eb;
+        border-radius: 50%; animation: spin 1s linear infinite;
+      }}
+      @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+      iframe {{ width: 100%; height: 100%; border: none; }}
+    </style>
+  </head>
+  <body>
+    <div id="loading">
+      <div class="spinner"></div>
+      <div>Идет расчет маршрутов, подождите...</div>
+    </div>
+    <iframe id="frame" src="{src}"></iframe>
+    <script>
+      const frame = document.getElementById('frame');
+      const loading = document.getElementById('loading');
+      frame.addEventListener('load', () => {{ loading.style.display = 'none'; }});
+    </script>
+  </body>
+</html>
+"""
+            return HTMLResponse(content=html)
+
         parsed_ids = None
         if task_ids:
             parsed_ids = [item.strip() for item in task_ids.split(",") if item.strip()]
