@@ -1,174 +1,205 @@
-# IFRE routing service (mock-first)
+# IFRE Routing Service
 
-This service runs on mock data that mirrors the structure of the real entities. The architecture is designed to connect to a production PostgreSQL database without changing business logic.
+Интеллектуальный сервис маршрутизации и назначения спецтехники по заявкам.
+Работает поверх дорожного графа месторождения, учитывает ETA, приоритеты, окна смен,
+совместимость типов работ и техники. Подходит для ручного подтверждения диспетчером.
 
-## TL;DR
+## Возможности
 
-1. Run locally: `make up`
-2. Open docs: `http://127.0.0.1:8000/docs`
-3. Try a demo scenario (see below)
+- Маршруты строго по графу дорог (не по прямой)
+- ETA и расстояние для каждой заявки
+- Ранжирование техники по скорингу (distance/ETA/wait/late)
+- Batch‑планирование на дату/смену с multi‑stop группировкой
+- Визуальная витрина (карта + таблицы)
+- Объяснения решений (reason)
 
-## Run with Docker (local)
+## Быстрый старт
 
-1. Fill local env file: `.envs/.local/.env`
-2. Start: `make up`
+1. Заполните `.envs/.local/.env`
+2. Запустите: `make up`
+3. Откройте документацию: `http://127.0.0.1:8000/docs`
 
-Local dev with auto-reload:
-
-```bash
-docker compose -f local.yml up
-```
-
-## Run with Docker (production)
-
-1. Fill production env file: `.envs/.production/.env`
-2. Start: `make up-prod`
-
-## Run without Docker
-
-1. Install deps: `pip install -r requirements.txt`
-2. Set env vars in your shell, or create `.env` in project root
-3. Run API: `uvicorn app.main:app --reload`
-
-## Connect a real PostgreSQL DB locally
-
-1. Put these into `.envs/.local/.env`:
-
-```
-IFRE_DATA_SOURCE=postgres
-IFRE_DB_URL=postgresql+psycopg://user:pass@host:5432/dbname
-```
-
-2. Start as usual:
+## Запуск в Docker (локально)
 
 ```
 make up
 ```
 
-If the DB is missing required tables or columns, the service will fail fast with a clear error.
+Локальная разработка с авто‑перезапуском:
 
-## Env files and behavior
+```
+docker compose -f local.yml up
+```
 
-- Local compose uses `.envs/.local/.env`
-- Production compose uses `.envs/.production/.env`
-- The app reads OS environment variables. It does not read `.envs/*` directly.
-- For non-docker runs, you can use a root `.env` file.
+## Запуск в Docker (production)
 
-## Key env vars
+1. Заполните `.envs/.production/.env`
+2. Запустите: `make up-prod`
 
-- `IFRE_DATA_SOURCE`: `mock` or `postgres`
-- `IFRE_DB_URL`: PostgreSQL URL (required for `postgres`)
-- `IFRE_AVG_SPEED_KMPH`: average speed for ETA
-- `IFRE_EDGE_WEIGHT_IN_METERS`: `1` (default) if road edges are in meters
-- `IFRE_USE_TASK_ASSIGNMENTS`: `true/false` — whether to use the optional assignments table
+## Запуск без Docker
 
-## Endpoints
+1. Установите зависимости: `pip install -r requirements.txt`
+2. Задайте переменные окружения, например:
+
+```
+source .envs/.local/.env
+```
+
+3. Запустите API:
+
+```
+uvicorn app.main:app --reload
+```
+
+## Файлы окружения
+
+- Локальный compose читает `.envs/.local/.env`
+- Production compose читает `.envs/.production/.env`
+- Приложение читает только переменные окружения
+- `.env.example` — полный список всех переменных
+
+## Ключевые переменные
+
+- `IFRE_DB_URL`: строка подключения PostgreSQL
+- `IFRE_DB_SCHEMA`: схема БД (обычно `references`)
+- `IFRE_AVG_SPEED_KMPH`: средняя скорость для ETA
+- `IFRE_MIN_SPEED_KMPH` / `IFRE_MAX_SPEED_KMPH`: фильтр мусорных скоростей
+- `IFRE_EDGE_WEIGHT_IN_METERS`: `1`, если веса рёбер в метрах
+- `IFRE_GRAPH_BIDIRECTIONAL`: `true/false` — форсировать двунаправленный граф
+- `IFRE_GRAPH_BIDIRECTIONAL_THRESHOLD`: порог авто‑детекта
+- `IFRE_TASK_DOCUMENT_CODES`: коды документов EAV для задач
+- `IFRE_EAV_MAPPING_FILE`: JSON‑маппинг полей EAV
+- `IFRE_COMPATIBILITY_STRICT`: строгая совместимость (несовместимые исключаются)
+- `IFRE_COMPATIBILITY_PENALTY`: штраф за несовместимость в soft‑режиме
+- `IFRE_USE_SNAPSHOT_BY_PLANNING_DATE`: брать снапшоты техники ближе к дате планирования
+- `IFRE_ANCHOR_UNITS_AT_PLAN_START`: якорить доступность техники на старт планирования
+- `IFRE_ASSIGNMENTS_GROUPING`: включить multi‑stop группировку в batch‑планировании
+
+## Данные и соответствие ТЗ
+
+Используются данные БД:
+
+- `references.road_nodes`, `references.road_edges` — граф дорог
+- `references.wells` — точки назначения (uwi, lon/lat)
+- `references.wialon_units_snapshot_*` — позиции техники
+- `tasks` (если есть) или EAV‑схема `dcm.records` + `dcm.record_indicator_values`
+
+Если таблицы `tasks` нет, сервис собирает заявки из EAV по `IFRE_TASK_DOCUMENT_CODES`.
+Записи без валидной скважины исключаются (см. `/api/tasks/debug`).
+
+## Совместимость техники (4.6)
+
+Словарь совместимости строится из EAV:
+
+- пары `WKIND` (тип работ) ↔ `VEHKIND` (тип техники)
+- тип техники подтягивается по техкарточкам (`TRS_VEHCARD_SNUM` → `TRS_VEHCARD_CLASS`)
+
+Режимы:
+
+- `IFRE_COMPATIBILITY_STRICT=true` — несовместимые или `unknown` исключаются
+- `IFRE_COMPATIBILITY_STRICT=false` — несовместимые допускаются со штрафом
+
+## Скоринг
+
+Скоринг минимизирует стоимость:
+
+- расстояние
+- ETA
+- ожидание до planned_start
+- опоздание относительно SLA
+
+Весами управляют `IFRE_SCORE_W_*`.
+
+## Эндпоинты
 
 - `POST /api/recommendations`
 - `POST /api/route`
 - `POST /api/matrix`
 - `POST /api/multitask`
 - `POST /api/assignments`
-- `GET /demo/route-map?wialon_id=1001&uwi=W-001`
-- `GET /demo/batch-plan?start_date=2025-02-20&shift=day`
+- `GET /api/tasks`
+- `GET /api/tasks/debug`
+- `GET /demo/route-map?wialon_id=...&uwi=...`
+- `GET /demo/batch-plan?start_date=YYYY-MM-DD&shift=day|night`
 
-All request/response schemas are in `app/models/schemas.py`.
+Схемы запросов/ответов — в `app/models/schemas.py`.
 
-## Demo pages (open in browser)
+`POST /api/assignments` принимает флаг `grouping` (`true/false`).
+Если не задан — используется `IFRE_ASSIGNMENTS_GROUPING`.
 
-- Single route map:
-  - `http://127.0.0.1:8000/demo/route-map?wialon_id=1001&uwi=W-001`
-- Batch plan map + tables:
-  - `http://127.0.0.1:8000/demo/batch-plan?start_date=2025-02-20&shift=day`
+## Демо‑страницы
 
-If you use `curl`, you will only see raw HTML. For the map, open the URL in a browser.
+- Маршрут одной заявки:
 
-## Demo scenarios (from the spec)
+```
+http://127.0.0.1:8000/demo/route-map?wialon_id=1001&uwi=W-001
+```
 
-Scenario 1 — urgent task (high priority):
+- Batch‑планирование (карта + таблицы):
 
-```bash
+```
+http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-31&shift=night
+```
+
+Группировка включена по умолчанию. Чтобы отключить:
+
+```
+...&grouping=false
+```
+
+## Примеры запросов (curl)
+
+### 1) Рекомендации
+
+```
 curl -X POST http://127.0.0.1:8000/api/recommendations \
   -H 'Content-Type: application/json' \
   -d '{
-    "task_id": "T-2025-0042",
-    "priority": "high",
-    "destination_uwi": "W-001",
-    "planned_start": "2025-02-20T08:00:00",
-    "duration_hours": 4.5
+    "task_id": "12649",
+    "priority": "low",
+    "destination_uwi": "AIR_0003",
+    "planned_start": "2025-10-29T08:00:00",
+    "duration_hours": 1
   }'
 ```
 
-Scenario 2 — baseline vs optimized:
+### 2) Маршрут по графу
 
-```bash
-curl -X POST http://127.0.0.1:8000/api/recommendations \
+```
+curl -X POST http://127.0.0.1:8000/api/route \
   -H 'Content-Type: application/json' \
-  -d '{
-    "task_id": "T-2025-0043",
-    "priority": "medium",
-    "destination_uwi": "W-002",
-    "planned_start": "2025-02-20T09:00:00",
-    "duration_hours": 3.0,
-    "mode": "baseline"
-  }'
+  -d '{"from":{"wialon_id":29935360},"to":{"uwi":"AIR_0003"}}'
 ```
 
-Then run the same request without `mode` to see optimized ranking.
+### 3) Matrix
 
-Exclude busy units (optional):
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/recommendations \
+```
+curl -X POST http://127.0.0.1:8000/api/matrix \
   -H 'Content-Type: application/json' \
-  -d '{
-    "task_id": "T-2025-0043",
-    "priority": "medium",
-    "destination_uwi": "W-002",
-    "planned_start": "2025-02-20T09:00:00",
-    "duration_hours": 3.0,
-    "exclude_busy": true
-  }'
+  -d '{"start_nodes":[3840],"end_nodes":[2977]}'
 ```
 
-Scenario 3 — multitask grouping:
+### 4) Multitask
 
-```bash
+```
 curl -X POST http://127.0.0.1:8000/api/multitask \
   -H 'Content-Type: application/json' \
   -d '{
-    "task_ids": ["T-2025-0042", "T-2025-0043", "T-2025-0044"],
-    "constraints": { "max_total_time_minutes": 480, "max_detour_ratio": 1.3 }
+    "task_ids":["12649","12653","12686"],
+    "constraints":{"max_total_time_minutes":480,"max_detour_ratio":1.3}
   }'
 ```
 
-## Scoring (short)
+### 5) Batch‑планирование
 
 ```
-cost = w_distance * distance_km
-     + w_eta * travel_minutes
-     + w_wait * wait_minutes * priority_weight
-     + w_late * late_minutes * priority_weight
-score = 1 / (1 + cost)
+curl -X POST http://127.0.0.1:8000/api/assignments \
+  -H 'Content-Type: application/json' \
+  -d '{"filters":{"start_date":"2025-10-29","end_date":"2025-11-05"},"grouping":true}'
 ```
 
-Priority weights: `high=0.55`, `medium=0.35`, `low=0.10`.
+## Диагностика
 
-## ETA / duration forecast (no LLM)
-
-We intentionally do **not** use an LLM for ETA or duration. These are numeric forecasts and must be stable and reproducible.
-
-Important:
-- For ML training we need **historical actual durations** (fact start/end). If there is no history, ML cannot be trained.
-
-Hackathon compromise:
-- **Data‑driven baseline**: median duration by `task_type` from the tasks table (no training). If `duration_hours` is missing or `<= 0`, we substitute the median (fallback default `2.0h` if there is no history).
-- **ML stub**: a placeholder module that returns `None` until real факты выполнения are available. Once you have history, replace it with a regression model using the same interface.
-
-## Current plan (optional)
-
-If your DB has a separate table for current assignments (e.g. `task_assignments`),
-set `IFRE_USE_TASK_ASSIGNMENTS=true` and the service will treat those tasks as already assigned and mark
-the corresponding vehicles as busy.
-
-If this flag is `false`, the service does not query assignments at all (no errors if the table is absent).
+- `GET /api/tasks/debug` — почему часть записей не попала в задачи
+- Ошибки БД или отсутствующие таблицы приводят к явным исключениям
+- Для тяжёлых сценариев уменьшайте диапазон дат и `limit`

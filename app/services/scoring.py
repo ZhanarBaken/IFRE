@@ -48,6 +48,7 @@ def score_task(
     distance_km: float,
     travel_minutes: int,
     unit_available_at: datetime,
+    compatibility_penalty: float = 0.0,
 ) -> ScoreResult:
     planned_start = task.planned_start
     deadline = planned_start + timedelta(hours=priority_deadline_hours(task.priority))
@@ -64,12 +65,16 @@ def score_task(
         + settings.score_w_wait * wait_minutes * prio_weight
         + settings.score_w_late * late_minutes * prio_weight
     )
+    if compatibility_penalty:
+        cost += compatibility_penalty
 
     score = 1.0 / (1.0 + cost)
     reason = (
         f"dist {distance_km:.2f} km, eta {travel_minutes} min, "
         f"wait {wait_minutes} min, late {late_minutes} min, prio {task.priority}"
     )
+    if compatibility_penalty:
+        reason = f"{reason}, compat_penalty {compatibility_penalty:.2f}"
     end_time = start_time + timedelta(hours=task.duration_hours)
     return ScoreResult(
         score=round(score, 3),

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import List
 
+from app.core.config import settings
 from app.data.repositories.base import BaseRepository
 from app.models.schemas import RecommendationUnit, Task
+from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
 from app.services.fleet_state import FleetStateService
 from app.services.routing import RoutingService
@@ -16,15 +18,6 @@ class RecommendationService:
         self.routing = routing
         self.fleet_state = FleetStateService(repo, routing)
         self.duration_forecaster = DurationForecaster(repo)
-
-    def _is_compatible(self, task_type: str, unit_type: str) -> bool:
-        rules = self.repo.compatibility()
-        if not rules:
-            return True
-        for rule in rules:
-            if rule.task_type == task_type and rule.unit_type == unit_type:
-                return True
-        return False
 
     def recommend(
         self,
@@ -42,10 +35,16 @@ class RecommendationService:
         if task_type == "unknown":
             task_type = None
         well = self._well(destination_uwi)
-        units_state = self.fleet_state.build_state()
+        units_state = self.fleet_state.build_state(anchor_time=planned_start)
+        rules = self.repo.compatibility()
+        has_rules = bool(rules)
+        compat = {}
+        compat_norm = {}
+        if has_rules:
+            compat, compat_norm = build_compat_index(rules)
 
         if mode_norm == "baseline":
-            return self._recommend_baseline(units_state, well, task_type, planned_start)
+            return self._recommend_baseline(units_state, well, task_type, planned_start, has_rules, compat, compat_norm)
 
         candidates: List[RecommendationUnit] = []
         task_for_score = self._task_for_scoring(
@@ -55,19 +54,29 @@ class RecommendationService:
         unit_availability = {u.wialon_id: u.available_at.isoformat() for u in units_state.values()}
 
         for unit in units_state.values():
-            if task_type and not self._is_compatible(task_type, unit.unit_type):
-                continue
+            status = True
+            if has_rules and task_type:
+                status = compatibility_status(task_type, unit.unit_type, compat, compat_norm)
+                if status is False or status is None:
+                    if settings.compatibility_strict:
+                        continue
 
-            route = self.routing.route_between_points(unit.lon, unit.lat, well.lon, well.lat)
+            route = self.routing.route_between_points_or_none(unit.lon, unit.lat, well.lon, well.lat)
+            if route is None:
+                continue
             distance_km = route["distance_km"]
             travel_minutes = int(round(distance_km / unit.speed_kmph * 60.0))
             if exclude_busy and planned_start is not None and unit.available_at > planned_start:
                 continue
+            compat_penalty = 0.0
+            if has_rules and status is False and not settings.compatibility_strict:
+                compat_penalty = settings.compatibility_penalty
             score_result = score_task(
                 task=task_for_score,
                 distance_km=distance_km,
                 travel_minutes=travel_minutes,
                 unit_available_at=unit.available_at,
+                compatibility_penalty=compat_penalty,
             )
 
             candidates.append(
@@ -91,7 +100,10 @@ class RecommendationService:
         return wells[0]
 
     def _infer_task_type(self, task_id: str) -> str | None:
-        task = self.repo.task_by_id(task_id)
+        try:
+            task = self.repo.task_by_id(task_id)
+        except Exception:
+            return None
         return task.task_type if task else None
 
     def _task_for_scoring(
@@ -103,7 +115,10 @@ class RecommendationService:
         planned_start,
         duration_hours,
     ) -> Task:
-        task = self.repo.task_by_id(task_id)
+        try:
+            task = self.repo.task_by_id(task_id)
+        except Exception:
+            task = None
         if planned_start is None:
             from datetime import datetime
 
@@ -127,12 +142,26 @@ class RecommendationService:
             task_type=task_type or "unknown",
         )
 
-    def _recommend_baseline(self, units_state, well, task_type: str | None, planned_start):
+    def _recommend_baseline(
+        self,
+        units_state,
+        well,
+        task_type: str | None,
+        planned_start,
+        has_rules: bool,
+        compat,
+        compat_norm,
+    ):
         candidates: List[RecommendationUnit] = []
         for unit in units_state.values():
-            if task_type and not self._is_compatible(task_type, unit.unit_type):
+            if has_rules and task_type:
+                status = compatibility_status(task_type, unit.unit_type, compat, compat_norm)
+                if status is False or status is None:
+                    if settings.compatibility_strict:
+                        continue
+            route = self.routing.route_between_points_or_none(unit.lon, unit.lat, well.lon, well.lat)
+            if route is None:
                 continue
-            route = self.routing.route_between_points(unit.lon, unit.lat, well.lon, well.lat)
             distance_km = route["distance_km"]
             travel_minutes = int(round(distance_km / unit.speed_kmph * 60.0))
             wait_minutes = 0

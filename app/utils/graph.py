@@ -64,7 +64,7 @@ class NodeIndex:
 
 
 class Graph:
-    def __init__(self, nodes: List[RoadNode], edges: List[RoadEdge]) -> None:
+    def __init__(self, nodes: List[RoadNode], edges: List[RoadEdge], bidirectional: bool = False) -> None:
         self.nodes = nodes
         self.coords: Dict[int, Tuple[float, float]] = {
             node.node_id: (node.lon, node.lat) for node in nodes
@@ -72,6 +72,8 @@ class Graph:
         self.adj: Dict[int, List[Tuple[int, float]]] = {node.node_id: [] for node in nodes}
         for edge in edges:
             self.adj.setdefault(edge.source, []).append((edge.target, edge.weight))
+            if bidirectional:
+                self.adj.setdefault(edge.target, []).append((edge.source, edge.weight))
         self._cache: Dict[Tuple[int, int], Tuple[float, List[int]]] = {}
 
     def shortest_path(self, start: int, end: int) -> Tuple[float, List[int]]:
@@ -111,6 +113,19 @@ class Graph:
         self._cache[cache_key] = result
         return result
 
+    def has_path(self, start: int, end: int) -> bool:
+        try:
+            self.shortest_path(start, end)
+        except Exception:
+            return False
+        return True
+
+    def shortest_path_or_none(self, start: int, end: int) -> Tuple[float, List[int]] | None:
+        try:
+            return self.shortest_path(start, end)
+        except Exception:
+            return None
+
     def shortest_paths_from(self, start: int, targets: List[int] | None = None) -> Dict[int, float]:
         dist: Dict[int, float] = {start: 0.0}
         heap = [(0.0, start)]
@@ -137,3 +152,14 @@ class Graph:
             lon, lat = self.coords[node_id]
             coords.append([lon, lat])
         return coords
+
+
+def should_make_bidirectional(edges: List[RoadEdge], threshold: float = 0.05) -> bool:
+    if not edges:
+        return False
+    edge_set = {(edge.source, edge.target) for edge in edges}
+    if not edge_set:
+        return False
+    reverse_hits = sum(1 for (src, dst) in edge_set if (dst, src) in edge_set)
+    ratio = reverse_hits / len(edge_set)
+    return ratio < threshold

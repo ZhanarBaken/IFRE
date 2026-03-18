@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
@@ -19,13 +19,14 @@ from app.models.schemas import (
     RouteRequest,
     RouteResponse,
     TaskFilters,
+    Task,
 )
 from app.services.assignments import AssignmentService
 from app.services.multitask import MultitaskService
 from app.services.recommendations import RecommendationService
 from app.services.routing import RoutingService
 from app.services.visualization import batch_plan_html, route_map_html
-from app.utils.graph import Graph, NodeIndex
+from app.utils.graph import Graph, NodeIndex, should_make_bidirectional
 
 
 app = FastAPI(title="IFRE Routing Service", version="0.1.0")
@@ -36,7 +37,10 @@ def startup() -> None:
     repo = get_repository()
     nodes = repo.road_nodes()
     edges = repo.road_edges()
-    graph = Graph(nodes, edges)
+    bidirectional = settings.graph_bidirectional
+    if bidirectional is None:
+        bidirectional = should_make_bidirectional(edges, settings.graph_bidirectional_threshold)
+    graph = Graph(nodes, edges, bidirectional=bidirectional)
     node_index = NodeIndex(nodes)
     routing = RoutingService(repo, graph, node_index)
     recommendations = RecommendationService(repo, routing)
@@ -136,8 +140,65 @@ async def assignments(req: AssignmentRequest):
         constraints = req.constraints
         max_total = constraints.max_total_time_minutes if constraints else 480
         max_detour = constraints.max_detour_ratio if constraints else 1.3
-        payload = app.state.assignments.plan(req.task_ids, req.filters, max_total, max_detour)
+        payload = app.state.assignments.plan(req.task_ids, req.filters, max_total, max_detour, grouping=req.grouping)
         return payload
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks", response_model=list[Task])
+async def tasks(
+    task_ids: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+    shift: str | None = None,
+    limit: int = 50,
+):
+    try:
+        parsed_ids = None
+        if task_ids:
+            parsed_ids = [item.strip() for item in task_ids.split(",") if item.strip()]
+        if parsed_ids:
+            return app.state.repo.tasks_by_ids(parsed_ids)
+
+        if start_date is None and end_date is None and shift is None:
+            # Fallback: return first N tasks
+            return app.state.repo.tasks()[:limit]
+
+        if shift:
+            if not start_date:
+                raise RuntimeError("start_date is required when shift is set")
+            if end_date and end_date != start_date:
+                raise RuntimeError("shift filter supports only a single date")
+            if shift == "day":
+                start_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=8)
+                end_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=20)
+            elif shift == "night":
+                start_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=20)
+                end_dt = datetime.combine(start_date, datetime.min.time()).replace(hour=8) + timedelta(days=1)
+            else:
+                raise RuntimeError("shift must be 'day' or 'night'")
+            return app.state.repo.tasks_by_window(start_dt, end_dt, limit=limit)
+
+        if not start_date:
+            raise RuntimeError("start_date is required")
+        end = end_date or start_date
+        start_dt = datetime.combine(start_date, datetime.min.time())
+        end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
+        return app.state.repo.tasks_by_window(start_dt, end_dt, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/tasks/debug")
+async def tasks_debug(limit: int = 50):
+    try:
+        # Ensure tasks are loaded to populate debug cache for EAV sources
+        _ = app.state.repo.tasks()
+        all_items = app.state.repo.tasks_debug(limit=None)
+        total = len(all_items)
+        items = all_items[:limit] if limit is not None else all_items
+        return {"total": total, "items": items}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -146,7 +207,6 @@ async def assignments(req: AssignmentRequest):
 async def health():
     return {
         "status": "ok",
-        "data_source": settings.data_source,
     }
 
 
@@ -174,6 +234,7 @@ async def demo_batch_plan(
     limit: int = 20,
     max_total_time_minutes: int = 480,
     max_detour_ratio: float = 1.3,
+    grouping: bool | None = None,
 ):
     try:
         parsed_ids = None
@@ -182,13 +243,19 @@ async def demo_batch_plan(
 
         filters = None
         if parsed_ids is None:
-            if start_date is None and settings.data_source == "mock":
-                start_date = date(2025, 2, 20)
-                shift = shift or "day"
             if start_date is not None or end_date is not None or shift is not None:
                 filters = TaskFilters(start_date=start_date, end_date=end_date, shift=shift, limit=limit)
 
-        payload = app.state.assignments.plan(parsed_ids, filters, max_total_time_minutes, max_detour_ratio)
-        return batch_plan_html(payload.assignments, payload.unassigned, summary=payload.summary, ai_summary=None)
+        if grouping is None:
+            grouping = True
+
+        payload = app.state.assignments.plan(
+            parsed_ids,
+            filters,
+            max_total_time_minutes,
+            max_detour_ratio,
+            grouping=grouping,
+        )
+        return batch_plan_html(payload.assignments, payload.unassigned, summary=payload.summary)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

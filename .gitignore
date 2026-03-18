@@ -26,4 +26,3 @@ dist/
 # Local config
 .env
 .envs/*
-!.envs/.local/

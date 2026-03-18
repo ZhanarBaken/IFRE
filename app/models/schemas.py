@@ -47,13 +47,6 @@ class Task(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-class TaskAssignment(BaseModel):
-    task_id: str
-    wialon_id: int
-    status: str | None = None
-    actual_start: datetime | None = None
-
-
 class Compatibility(BaseModel):
     task_type: str
     unit_type: str
@@ -146,6 +139,7 @@ class AssignmentRequest(BaseModel):
     task_ids: List[str] | None = None
     filters: Optional[TaskFilters] = None
     constraints: Optional[MultitaskConstraints] = None
+    grouping: bool | None = None
 
 
 class AssignmentItem(BaseModel):
@@ -155,6 +149,11 @@ class AssignmentItem(BaseModel):
     distance_km: float
     score: float
     reason: str
+    start_lon: float
+    start_lat: float
+    end_lon: float
+    end_lat: float
+    planned_start: datetime
     start_time: datetime
     end_time: datetime
     route_nodes: List[int]

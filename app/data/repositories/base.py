@@ -8,7 +8,6 @@ from app.models.schemas import (
     RoadEdge,
     RoadNode,
     Task,
-    TaskAssignment,
     Well,
     WialonUnitSnapshot,
 )
@@ -55,9 +54,8 @@ class BaseRepository(ABC):
     def wells_by_uwi(self, uwis: List[str]) -> List[Well]:
         raise NotImplementedError
 
-    @abstractmethod
-    def assignments(self) -> List[TaskAssignment]:
-        raise NotImplementedError
+    def tasks_debug(self, limit: int | None = None) -> List[dict]:
+        return []
 
     def task_by_id(self, task_id: str) -> Task | None:
         if not task_id:

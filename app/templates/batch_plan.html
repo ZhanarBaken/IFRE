@@ -1,0 +1,50 @@
+<style>
+  body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; }
+  .batch-wrap { padding: 16px 20px 28px; }
+  .batch-summary { margin: 0 0 12px; font-size: 14px; color: #52606d; }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; font-size: 13px; }
+  th, td { border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; }
+  th { background: #f5f7fa; }
+  h2 { margin: 14px 0 8px; font-size: 16px; }
+  .folium-map { width: 100% !important; height: 70vh !important; min-height: 620px; }
+  .leaflet-container { width: 100% !important; height: 70vh !important; min-height: 620px; }
+  tr.assign-row { cursor: pointer; }
+  tr.assign-row.active { background: #fff7cc; }
+  tr.assign-row.loading { opacity: 0.7; }
+</style>
+<div class="batch-wrap">
+  <div class="batch-summary">
+    Сводка: $summary_text. Назначено: $assigned_count. Без назначения: $unassigned_count.
+  </div>
+  <h2>Назначенные задачи</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID заявки</th>
+        <th>ID техники</th>
+        <th>ETA, мин</th>
+        <th>Дистанция, км</th>
+        <th>Скор</th>
+        <th>Причина</th>
+        <th>План</th>
+        <th>Старт</th>
+        <th>Финиш</th>
+      </tr>
+    </thead>
+    <tbody>
+      $assigned_rows
+    </tbody>
+  </table>
+  <h2>Неназначенные задачи</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>ID заявки</th>
+        <th>Причина</th>
+      </tr>
+    </thead>
+    <tbody>
+      $unassigned_rows
+    </tbody>
+  </table>
+</div>

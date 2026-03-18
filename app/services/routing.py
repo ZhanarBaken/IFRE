@@ -19,10 +19,13 @@ class RoutingService:
             return raw_distance / 1000.0
         return raw_distance
 
-    def route_between_points(self, start_lon: float, start_lat: float, end_lon: float, end_lat: float):
+    def route_between_points_or_none(self, start_lon: float, start_lat: float, end_lon: float, end_lat: float):
         start_node = self._snap(start_lon, start_lat)
         end_node = self._snap(end_lon, end_lat)
-        raw_distance, path = self.graph.shortest_path(start_node, end_node)
+        result = self.graph.shortest_path_or_none(start_node, end_node)
+        if result is None:
+            return None
+        raw_distance, path = result
         distance_km = self._distance_km(raw_distance)
         time_minutes = int(round(distance_km / settings.avg_speed_kmph * 60.0))
         coords = self.graph.path_coords(path)
@@ -34,6 +37,12 @@ class RoutingService:
             "start_node": start_node,
             "end_node": end_node,
         }
+
+    def route_between_points(self, start_lon: float, start_lat: float, end_lon: float, end_lat: float):
+        payload = self.route_between_points_or_none(start_lon, start_lat, end_lon, end_lat)
+        if payload is None:
+            raise ValueError("No path found")
+        return payload
 
     def route_from_unit_to_well(self, wialon_id: int, uwi: str):
         unit = self.repo.unit_by_id(wialon_id)
@@ -57,8 +66,11 @@ class RoutingService:
                 matrix[(start, end)] = (round(distance_km, 2), time_minutes)
         return matrix
 
-    def route_between_nodes(self, start_node: int, end_node: int, speed_kmph: float | None = None):
-        raw_distance, path = self.graph.shortest_path(start_node, end_node)
+    def route_between_nodes_or_none(self, start_node: int, end_node: int, speed_kmph: float | None = None):
+        result = self.graph.shortest_path_or_none(start_node, end_node)
+        if result is None:
+            return None
+        raw_distance, path = result
         distance_km = self._distance_km(raw_distance)
         speed = speed_kmph or settings.avg_speed_kmph
         time_minutes = int(round(distance_km / speed * 60.0))
@@ -69,3 +81,9 @@ class RoutingService:
             "nodes": path,
             "coords": coords,
         }
+
+    def route_between_nodes(self, start_node: int, end_node: int, speed_kmph: float | None = None):
+        payload = self.route_between_nodes_or_none(start_node, end_node, speed_kmph=speed_kmph)
+        if payload is None:
+            raise ValueError("No path found")
+        return payload

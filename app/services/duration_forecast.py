@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 from statistics import median
 from typing import Iterable
+import logging
 
 from app.data.repositories.base import BaseRepository
 from app.models.schemas import Task
 
 
 DEFAULT_DURATION_HOURS = 2.0
+logger = logging.getLogger(__name__)
 
 
 class StatsDurationModel:
@@ -71,7 +73,12 @@ class DurationForecaster:
 
     def _ensure_stats(self) -> StatsDurationModel:
         if self._stats is None:
-            self._stats = StatsDurationModel.from_tasks(self.repo.tasks())
+            try:
+                tasks = self.repo.tasks()
+            except Exception as exc:
+                logger.warning("duration stats: failed to load tasks, fallback to defaults: %s", exc)
+                tasks = []
+            self._stats = StatsDurationModel.from_tasks(tasks)
         return self._stats
 
     def predict(self, task_type: str | None, features: dict | None = None) -> float:

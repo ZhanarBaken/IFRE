@@ -6,9 +6,9 @@ from typing import Dict, List, Set
 from app.core.config import settings
 from app.data.repositories.base import BaseRepository
 from app.models.schemas import Task, TaskFilters
+from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
 from app.services.routing import RoutingService
-from app.services.scoring import shift_window
 from app.utils.geo import distance_km
 
 
@@ -25,9 +25,23 @@ class MultitaskService:
         self.duration_forecaster.fill_missing(tasks)
 
         wells_map = self._prefetch_wells(tasks)
-        groups = self._cluster_tasks(tasks, wells_map, max_total_time_minutes, max_detour_ratio)
-        baseline_distance_km, baseline_time_minutes = self._baseline(tasks, wells_map)
-        total_distance_km, total_time_minutes = self._estimate_group_metrics(groups, wells_map)
+        rules = self.repo.compatibility()
+        has_rules = bool(rules)
+        compat: Dict[str, Set[str]] = {}
+        compat_norm: Dict[str, Set[str]] = {}
+        if has_rules:
+            compat, compat_norm = build_compat_index(rules)
+        groups = self._cluster_tasks(
+            tasks, wells_map, max_total_time_minutes, max_detour_ratio, has_rules, compat, compat_norm
+        )
+        baseline = self._baseline(tasks, wells_map)
+        if baseline is None:
+            return self._empty(reason="no_path")
+        baseline_distance_km, baseline_time_minutes = baseline
+        metrics = self._estimate_group_metrics(groups, wells_map)
+        if metrics is None:
+            return self._empty(reason="no_path")
+        total_distance_km, total_time_minutes = metrics
 
         if total_distance_km <= 0:
             return self._empty()
@@ -94,7 +108,7 @@ class MultitaskService:
             raise RuntimeError(f"wells not found or have NULL coords: {missing}")
         return wells_map
 
-    def _baseline(self, tasks, wells_map):
+    def _baseline(self, tasks, wells_map) -> tuple[float, float] | None:
         total_distance = 0.0
         total_time = 0.0
         units = self.repo.units_snapshot()
@@ -104,17 +118,28 @@ class MultitaskService:
             well = wells_map[task.destination_uwi]
             best_dist = None
             for unit in units:
-                route = self.routing.route_between_points(unit.pos_x, unit.pos_y, well.lon, well.lat)
+                route = self.routing.route_between_points_or_none(unit.pos_x, unit.pos_y, well.lon, well.lat)
+                if route is None:
+                    continue
                 d = route["distance_km"]
                 if best_dist is None or d < best_dist:
                     best_dist = d
             if best_dist is None:
-                raise RuntimeError("no units available for baseline")
+                return None
             total_distance += best_dist
             total_time += best_dist / settings.avg_speed_kmph * 60.0 + task.duration_hours * 60.0
         return max(total_distance, 0.01), max(total_time, 1.0)
 
-    def _cluster_tasks(self, tasks, wells_map, max_total_time_minutes, max_detour_ratio):
+    def _cluster_tasks(
+        self,
+        tasks,
+        wells_map,
+        max_total_time_minutes,
+        max_detour_ratio,
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+    ):
         remaining = tasks[:]
         groups = []
         while remaining:
@@ -124,46 +149,69 @@ class MultitaskService:
             while changed:
                 changed = False
                 for other in list(remaining):
-                    if self._can_add(group, other, wells_map, max_total_time_minutes, max_detour_ratio):
+                    if self._can_add(
+                        group,
+                        other,
+                        wells_map,
+                        max_total_time_minutes,
+                        max_detour_ratio,
+                        has_rules,
+                        compat,
+                        compat_norm,
+                    ):
                         group.append(other)
                         remaining.remove(other)
                         changed = True
             groups.append(group)
         return groups
 
-    def _can_add(self, group, candidate, wells_map, max_total_time_minutes, max_detour_ratio):
+    def _can_add(
+        self,
+        group,
+        candidate,
+        wells_map,
+        max_total_time_minutes,
+        max_detour_ratio,
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+    ):
         new_group = group + [candidate]
-        if not self._has_compatible_unit(new_group):
+        if not self._has_compatible_unit(new_group, has_rules, compat, compat_norm):
             return False
         if not self._sla_feasible(new_group, wells_map):
             return False
         route_distance = self._group_route_distance(new_group, wells_map)
+        if route_distance is None:
+            return False
         baseline_distance, _baseline_time = self._group_baseline(new_group, wells_map)
+        if baseline_distance <= 0:
+            return False
         detour_ratio = route_distance / baseline_distance if baseline_distance > 0 else 999.0
         total_time = route_distance / settings.avg_speed_kmph * 60.0 + sum(
             t.duration_hours * 60.0 for t in new_group
         )
         return detour_ratio <= max_detour_ratio and total_time <= max_total_time_minutes
 
-    def _has_compatible_unit(self, tasks: List[Task]) -> bool:
-        rules = self.repo.compatibility()
-        if not rules:
+    def _has_compatible_unit(
+        self,
+        tasks: List[Task],
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+    ) -> bool:
+        if not has_rules:
             return True
-        compat: Dict[str, Set[str]] = {}
-        for rule in rules:
-            compat.setdefault(rule.task_type, set()).add(rule.unit_type)
+        if not settings.compatibility_strict:
+            return True
         units = self.repo.units_snapshot()
         if not units:
             return False
         for unit in units:
             ok = True
             for task in tasks:
-                if task.task_type == "unknown":
-                    continue
-                if task.task_type not in compat:
-                    ok = False
-                    break
-                if unit.unit_type not in compat[task.task_type]:
+                status = compatibility_status(task.task_type, unit.unit_type, compat, compat_norm)
+                if status is False or status is None:
                     ok = False
                     break
             if ok:
@@ -180,30 +228,46 @@ class MultitaskService:
                 prev = ordered[idx - 1]
                 well_a = wells_map[prev.destination_uwi]
                 well_b = wells_map[task.destination_uwi]
-                route = self.routing.route_between_points(well_a.lon, well_a.lat, well_b.lon, well_b.lat)
+                route = self.routing.route_between_points_or_none(well_a.lon, well_a.lat, well_b.lon, well_b.lat)
+                if route is None:
+                    return False
                 travel_minutes = route["time_minutes"]
                 arrival_time = current_time + timedelta(minutes=travel_minutes)
 
             start_time = max(arrival_time, task.planned_start)
-            _, shift_end = shift_window(task.planned_start)
-            if start_time > shift_end:
-                return False
             current_time = start_time + timedelta(hours=task.duration_hours)
         return True
 
     def _group_baseline(self, group, wells_map):
-        total_distance, total_time = self._baseline(group, wells_map)
-        return total_distance, total_time
+        baseline = self._baseline(group, wells_map)
+        if baseline is None:
+            return 0.0, 0.0
+        return baseline
 
     def _group_route_distance(self, group, wells_map):
-        if len(group) == 1:
-            return 0.1
         ordered = self._nearest_neighbor_order(group, wells_map)
         distance = 0.0
+        units = self.repo.units_snapshot()
+        if not units:
+            return None
+        first_well = wells_map[ordered[0].destination_uwi]
+        best_start = None
+        for unit in units:
+            route = self.routing.route_between_points_or_none(unit.pos_x, unit.pos_y, first_well.lon, first_well.lat)
+            if route is None:
+                continue
+            d = route["distance_km"]
+            if best_start is None or d < best_start:
+                best_start = d
+        if best_start is None:
+            return None
+        distance += best_start
         for a, b in zip(ordered, ordered[1:]):
             well_a = wells_map[a.destination_uwi]
             well_b = wells_map[b.destination_uwi]
-            route = self.routing.route_between_points(well_a.lon, well_a.lat, well_b.lon, well_b.lat)
+            route = self.routing.route_between_points_or_none(well_a.lon, well_a.lat, well_b.lon, well_b.lat)
+            if route is None:
+                return None
             distance += route["distance_km"]
         return max(distance, 0.1)
 
@@ -229,13 +293,15 @@ class MultitaskService:
         total_time = 0.0
         for group in groups:
             distance = self._group_route_distance(group, wells_map)
+            if distance is None:
+                return None
             total_distance += distance
             total_time += distance / settings.avg_speed_kmph * 60.0 + sum(
                 t.duration_hours * 60.0 for t in group
             )
         return total_distance, total_time
 
-    def _empty(self):
+    def _empty(self, reason: str = "no tasks"):
         return {
             "groups": [],
             "strategy_summary": "separate",
@@ -244,5 +310,5 @@ class MultitaskService:
             "baseline_distance_km": 0.0,
             "baseline_time_minutes": 0,
             "savings_percent": 0.0,
-            "reason": "no tasks",
+            "reason": reason,
         }
