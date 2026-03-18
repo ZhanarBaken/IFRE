@@ -1,0 +1,12 @@
+services:
+  ifre-api:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./.envs:/app/.envs:ro
+    environment:
+      IFRE_ENV: ${IFRE_ENV:-local}
+      IFRE_DATA_SOURCE: ${IFRE_DATA_SOURCE:-mock}
+      IFRE_DB_URL: ${IFRE_DB_URL:-postgresql+psycopg://user:pass@host:5432/dbname}
+      IFRE_AVG_SPEED_KMPH: ${IFRE_AVG_SPEED_KMPH:-30}
