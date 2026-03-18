@@ -301,10 +301,6 @@ class AssignmentService:
             unit = best["unit"]
             route = best["route"]
             score = best["score"]
-            start_lon = unit.lon
-            start_lat = unit.lat
-            end_lon = best["well"].lon
-            end_lat = best["well"].lat
 
             assignments.append(
                 AssignmentItem(
@@ -314,10 +310,6 @@ class AssignmentService:
                     distance_km=route["distance_km"],
                     score=score.score,
                     reason=score.reason,
-                    start_lon=start_lon,
-                    start_lat=start_lat,
-                    end_lon=end_lon,
-                    end_lat=end_lat,
                     planned_start=task.planned_start,
                     start_time=score.start_time,
                     end_time=score.end_time,
@@ -525,8 +517,6 @@ class AssignmentService:
             plan_items = []
             current_node = unit.node_id
             current_time = unit.available_at
-            current_lon = unit.lon
-            current_lat = unit.lat
             used_minutes = unit_minutes.get(unit_id, 0.0)
             total_cost = 0.0
             total_minutes = 0.0
@@ -571,24 +561,18 @@ class AssignmentService:
                         wialon_id=unit.wialon_id,
                         eta_minutes=score_result.eta_minutes,
                         distance_km=distance_km,
-                        score=score_result.score,
-                        reason=score_result.reason,
-                        start_lon=current_lon,
-                        start_lat=current_lat,
-                        end_lon=well.lon,
-                        end_lat=well.lat,
-                        planned_start=task.planned_start,
-                        start_time=score_result.start_time,
-                        end_time=score_result.end_time,
-                        route_nodes=route["nodes"],
+                    score=score_result.score,
+                    reason=score_result.reason,
+                    planned_start=task.planned_start,
+                    start_time=score_result.start_time,
+                    end_time=score_result.end_time,
+                    route_nodes=route["nodes"],
                         route_coords=route["coords"],
                     )
                 )
 
                 current_time = score_result.end_time
                 current_node = task_node
-                current_lon = well.lon
-                current_lat = well.lat
 
             if failed:
                 fail_reasons.add(fail_reason)

@@ -54,14 +54,11 @@ def batch_plan_html(
     unassigned: Sequence[UnassignedItem],
     summary: str | None = None,
 ) -> str:
-    points = []
-    for item in assignments:
-        points.append((item.start_lon, item.start_lat))
-        points.append((item.end_lon, item.end_lat))
-    if points:
-        avg_lon = sum(p[0] for p in points) / len(points)
-        avg_lat = sum(p[1] for p in points) / len(points)
-        zoom = 10
+    coords = [coord for item in assignments for coord in item.route_coords if len(coord) >= 2]
+    if coords:
+        avg_lon = sum(c[0] for c in coords) / len(coords)
+        avg_lat = sum(c[1] for c in coords) / len(coords)
+        zoom = 12
     else:
         avg_lon, avg_lat, zoom = 0.0, 0.0, 2
 
@@ -87,15 +84,59 @@ def batch_plan_html(
     ]
     color_by_unit: dict[int, str] = {}
 
-    row_colors: Dict[str, str] = {}
+    grouped: dict[int, list[AssignmentItem]] = {}
     for item in assignments:
-        color = color_by_unit.setdefault(item.wialon_id, palette[len(color_by_unit) % len(palette)])
-        row_colors[item.task_id] = color
+        grouped.setdefault(item.wialon_id, []).append(item)
 
-    lazy_js = _build_lazy_map_js(fmap.get_name())
-    if lazy_js:
-        fmap.get_root().script.add_child(Element(lazy_js))
-    table_html = _batch_table_html(assignments, unassigned, summary, row_colors)
+    polyline_vars: Dict[str, str] = {}
+    polyline_colors: Dict[str, str] = {}
+
+    for unit_id, items in grouped.items():
+        items_sorted = sorted(items, key=lambda x: x.start_time)
+        color = color_by_unit.setdefault(unit_id, palette[len(color_by_unit) % len(palette)])
+
+        first_coords = items_sorted[0].route_coords if items_sorted else []
+        if first_coords and len(first_coords[0]) >= 2:
+            start_lon, start_lat = first_coords[0][0], first_coords[0][1]
+            folium.Marker(
+                [start_lat, start_lon],
+                tooltip=f"старт техники {unit_id}",
+                icon=folium.Icon(color="green", icon="play"),
+            ).add_to(fmap)
+
+        for idx, item in enumerate(items_sorted, start=1):
+            if not item.route_coords:
+                continue
+            sampled = _downsample_coords(item.route_coords)
+            latlon = [(coord[1], coord[0]) for coord in sampled if len(coord) >= 2]
+            if len(latlon) < 2:
+                continue
+            line = folium.PolyLine(
+                latlon,
+                color=color,
+                weight=4,
+                opacity=0.85,
+                tooltip=f"заявка {item.task_id} / техника {unit_id}",
+            ).add_to(fmap)
+            polyline_vars[item.task_id] = line.get_name()
+            polyline_colors[item.task_id] = color
+            end = latlon[-1]
+            folium.Marker(
+                location=end,
+                icon=folium.DivIcon(
+                    html=(
+                        f'<div style="font-size: 12px; color: white; background: {color}; '
+                        f'border-radius: 12px; width: 22px; height: 22px; '
+                        f'line-height: 22px; text-align: center;">{idx}</div>'
+                    )
+                ),
+                tooltip=f"{item.task_id} (точка {idx})",
+            ).add_to(fmap)
+
+    polyline_js = _build_polyline_js(polyline_vars, polyline_colors, fmap.get_name())
+    if polyline_js:
+        fmap.get_root().script.add_child(Element(polyline_js))
+    table_html = _batch_table_html(assignments, unassigned, summary)
     fmap.get_root().html.add_child(Element(table_html))
 
     return fmap.get_root().render()
@@ -111,21 +152,23 @@ def _downsample_coords(coords: List[List[float]], max_points: int = 250) -> List
     return sampled
 
 
-def _build_lazy_map_js(map_name: str) -> str:
+def _build_polyline_js(
+    polyline_vars: Dict[str, str],
+    polyline_colors: Dict[str, str],
+    map_name: str,
+) -> str:
+    if not polyline_vars:
+        return ""
+
     lines: List[str] = []
     lines.append("(function(){")
     lines.append("  window.addEventListener('load', function(){")
     lines.append(f"    const mapName = {json.dumps(map_name)};")
     lines.append("    const linesByTask = {};")
+    for task_id, var_name in polyline_vars.items():
+        lines.append(f"    linesByTask[{json.dumps(task_id)}] = {var_name};")
+    lines.append(f"    const colors = {json.dumps(polyline_colors)};")
     lines.append("    let pinned = null;")
-    lines.append("    const downsample = (coords, maxPoints=400) => {")
-    lines.append("      if(!coords || coords.length <= maxPoints) return coords || [];")
-    lines.append("      const step = Math.ceil(coords.length / maxPoints);")
-    lines.append("      const sampled = [];")
-    lines.append("      for(let i=0;i<coords.length;i+=step){ sampled.push(coords[i]); }")
-    lines.append("      if(sampled[sampled.length-1] !== coords[coords.length-1]){ sampled.push(coords[coords.length-1]); }")
-    lines.append("      return sampled;")
-    lines.append("    };")
     lines.append("    const waitForMap = () => {")
     lines.append("      const map = window[mapName];")
     lines.append("      if(!map){ setTimeout(waitForMap, 120); return; }")
@@ -144,8 +187,7 @@ def _build_lazy_map_js(map_name: str) -> str:
     lines.append("        if(!force && pinned === taskId) return;")
     lines.append("        const line = linesByTask[taskId];")
     lines.append("        if(!line) return;")
-    lines.append("        const row = document.querySelector(`tr.assign-row[data-task=\"${taskId}\"]`);")
-    lines.append("        const color = row ? (row.getAttribute('data-color') || '#1f77b4') : '#1f77b4';")
+    lines.append("        const color = colors[taskId] || '#1f77b4';")
     lines.append("        line.setStyle({color:color, weight:4, opacity:0.85});")
     lines.append("        setActive(taskId, false);")
     lines.append("      };")
@@ -156,47 +198,19 @@ def _build_lazy_map_js(map_name: str) -> str:
     lines.append("        const line = linesByTask[taskId];")
     lines.append("        if(line && line.getBounds){ map.fitBounds(line.getBounds(), {padding:[20,20]}); }")
     lines.append("      };")
-    lines.append("      const buildLine = (taskId, row, coords) => {")
-    lines.append("        if(!coords || coords.length < 2) return;")
-    lines.append("        const color = row.getAttribute('data-color') || '#1f77b4';")
-    lines.append("        const sampled = downsample(coords);")
-    lines.append("        const latlon = sampled.map(c => [c[1], c[0]]);")
-    lines.append("        const line = L.polyline(latlon, {color: color, weight:4, opacity:0.85}).addTo(map);")
-    lines.append("        linesByTask[taskId] = line;")
-    lines.append("        line.on('mouseover', () => highlight(taskId));")
-    lines.append("        line.on('mouseout', () => reset(taskId));")
-    lines.append("        line.on('click', () => pin(taskId));")
-    lines.append("      };")
     lines.append("      const rows = document.querySelectorAll('tr.assign-row[data-task]');")
     lines.append("      rows.forEach(row => {")
     lines.append("        const taskId = row.getAttribute('data-task');")
-    lines.append("        if(!taskId) return;")
-    lines.append("        row.addEventListener('mouseenter', () => { if(linesByTask[taskId]) highlight(taskId); });")
-    lines.append("        row.addEventListener('mouseleave', () => { if(linesByTask[taskId]) reset(taskId); });")
-    lines.append("        row.addEventListener('click', async () => {")
-    lines.append("          if(linesByTask[taskId]){ pin(taskId); return; }")
-    lines.append("          const startLon = row.getAttribute('data-start-lon');")
-    lines.append("          const startLat = row.getAttribute('data-start-lat');")
-    lines.append("          const endLon = row.getAttribute('data-end-lon');")
-    lines.append("          const endLat = row.getAttribute('data-end-lat');")
-    lines.append("          if(!startLon || !startLat || !endLon || !endLat) return;")
-    lines.append("          row.classList.add('loading');")
-    lines.append("          try {")
-    lines.append("            const res = await fetch('/api/route', {")
-    lines.append("              method: 'POST',")
-    lines.append("              headers: { 'Content-Type': 'application/json' },")
-    lines.append("              body: JSON.stringify({ from: { lon: parseFloat(startLon), lat: parseFloat(startLat) }, to: { lon: parseFloat(endLon), lat: parseFloat(endLat) } })")
-    lines.append("            });")
-    lines.append("            const data = await res.json();")
-    lines.append("            if(!res.ok){ throw new Error(data.detail || 'route error'); }")
-    lines.append("            buildLine(taskId, row, data.coords || []);")
-    lines.append("            pin(taskId);")
-    lines.append("          } catch (err) {")
-    lines.append("            console.error(err);")
-    lines.append("          } finally {")
-    lines.append("            row.classList.remove('loading');")
-    lines.append("          }")
-    lines.append("        });")
+    lines.append("        if(!linesByTask[taskId]) return;")
+    lines.append("        row.addEventListener('mouseenter', () => highlight(taskId));")
+    lines.append("        row.addEventListener('mouseleave', () => reset(taskId));")
+    lines.append("        row.addEventListener('click', () => pin(taskId));")
+    lines.append("      });")
+    lines.append("      Object.keys(linesByTask).forEach(taskId => {")
+    lines.append("        const line = linesByTask[taskId];")
+    lines.append("        line.on('mouseover', () => highlight(taskId));")
+    lines.append("        line.on('mouseout', () => reset(taskId));")
+    lines.append("        line.on('click', () => pin(taskId));")
     lines.append("      });")
     lines.append("    };")
     lines.append("    waitForMap();")
@@ -209,16 +223,11 @@ def _batch_table_html(
     assignments: Sequence[AssignmentItem],
     unassigned: Sequence[UnassignedItem],
     summary: str | None,
-    row_colors: Dict[str, str],
 ) -> str:
     assigned_rows = []
     for item in assignments:
-        color = row_colors.get(item.task_id, "#1f77b4")
         assigned_rows.append(
-            f'<tr class="assign-row" data-task="{escape(item.task_id)}" '
-            f'data-start-lon="{item.start_lon:.6f}" data-start-lat="{item.start_lat:.6f}" '
-            f'data-end-lon="{item.end_lon:.6f}" data-end-lat="{item.end_lat:.6f}" '
-            f'data-color="{color}">'
+            f'<tr class="assign-row" data-task="{escape(item.task_id)}">'
             f"<td>{escape(item.task_id)}</td>"
             f"<td>{item.wialon_id}</td>"
             f"<td>{item.eta_minutes}</td>"
