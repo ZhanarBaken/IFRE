@@ -1,4 +1,4 @@
-.PHONY: help dev up build down logs shell up-prod
+.PHONY: help dev up build down logs shell up-prod env
 
 DC = docker compose -f local.yml
 DC_PROD = docker compose -f production.yml
@@ -34,3 +34,12 @@ shell:
 
 up-prod:
 	$(DC_PROD) up -d --build
+
+env:
+	mkdir -p .envs/.local
+	@if [ ! -f .envs/.local/.env ]; then \
+		cp .env.example .envs/.local/.env; \
+		echo "Created .envs/.local/.env from .env.example"; \
+	else \
+		echo ".envs/.local/.env already exists"; \
+	fi
