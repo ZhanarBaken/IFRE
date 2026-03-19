@@ -1,128 +1,107 @@
 # IFRE Routing Service
 
-Интеллектуальный сервис маршрутизации и назначения спецтехники по заявкам.
-Работает поверх дорожного графа месторождения, учитывает ETA, приоритеты, окна смен,
-совместимость типов работ и техники. Подходит для ручного подтверждения диспетчером.
+Прототип сервиса маршрутизации и назначения спецтехники на месторождении.
+Строит маршруты по дорожному графу, рассчитывает ETA и скоринг, поддерживает группировку заявок (multi‑stop) и демонстрацию на карте.
+
+## TL;DR
+
+1. `make env`
+2. заполнить `.envs/.local/.env`
+3. `make up`
+4. `http://127.0.0.1:8000/docs` и демо‑страницы
 
 ## Возможности
 
-- Маршруты строго по графу дорог (не по прямой)
+- Маршрутизация строго по графу дорог (не по прямой)
 - ETA и расстояние для каждой заявки
-- Ранжирование техники по скорингу (distance/ETA/wait/late)
+- Ранжирование техники по скорингу (distance/ETA/wait/late/SLA)
 - Batch‑планирование на дату/смену с multi‑stop группировкой
 - Визуальная витрина (карта + таблицы)
-- Объяснения решений (reason)
+- Понятные причины назначений и отказов
+- Опциональная AI‑переформулировка `reason`
+
+## Архитектура
+
+```
+API (FastAPI)
+  ├─ Recommendations → Scoring
+  ├─ Routing / Matrix
+  ├─ Multitask (grouping)
+  └─ Assignments (batch plan)
+        ↓
+RoutingService → Graph (road_nodes/road_edges)
+Repository → PostgreSQL (references + tasks/EAV)
+```
 
 ## Быстрый старт
 
-1. Создайте локальный env: `make env`
-2. Заполните `.envs/.local/.env`
-3. Запустите: `make up`
-4. Откройте документацию: `http://127.0.0.1:8000/docs`
-
-## Запуск в Docker (локально)
-
 ```
+make env
 make up
 ```
 
-Локальная разработка с авто‑перезапуском:
+Документация: `http://127.0.0.1:8000/docs`
+
+## Переменные окружения
+
+- `.envs/.local/.env` — локальный запуск
+- `.envs/.production/.env` — production
+- `.env.example` — полный список
+
+Ключевые:
+
+- `IFRE_DB_URL` — PostgreSQL
+- `IFRE_DB_SCHEMA` — схема (обычно `references`)
+- `IFRE_AVG_SPEED_KMPH`, `IFRE_MIN_SPEED_KMPH`, `IFRE_MAX_SPEED_KMPH`
+- `IFRE_EDGE_WEIGHT_IN_METERS` — веса рёбер в метрах
+- `IFRE_SCORE_W_DISTANCE`, `IFRE_SCORE_W_ETA`, `IFRE_SCORE_W_WAIT`, `IFRE_SCORE_W_LATE`
+- `IFRE_SCORE_POINTS_SCALE` — шкала перевода cost → score 0–100
+- `IFRE_COMPATIBILITY_STRICT` / `IFRE_COMPATIBILITY_PENALTY`
+- `IFRE_USE_SNAPSHOT_BY_PLANNING_DATE`
+- `IFRE_ANCHOR_UNITS_AT_PLAN_START`
+- `IFRE_ASSIGNMENTS_GROUPING`
+- `IFRE_MAX_TOTAL_TIME_MINUTES_DEFAULT`
+
+### AI‑reason (опционально)
 
 ```
-docker compose -f local.yml up
+IFRE_REASON_AI_ENABLED=true
+IFRE_REASON_AI_API_URL=https://llm.alem.ai/v1/chat/completions
+IFRE_REASON_AI_MODEL=qwen3
+IFRE_REASON_AI_API_KEY=... 
 ```
-
-## Запуск в Docker (production)
-
-1. Заполните `.envs/.production/.env`
-2. Запустите: `make up-prod`
-
-## Запуск без Docker
-
-1. Установите зависимости: `pip install -r requirements.txt`
-2. Задайте переменные окружения, например:
-
-```
-source .envs/.local/.env
-```
-
-3. Запустите API:
-
-```
-uvicorn app.main:app --reload
-```
-
-## Файлы окружения
-
-- Локальный compose читает `.envs/.local/.env`
-- Production compose читает `.envs/.production/.env`
-- Приложение читает только переменные окружения
-- `.env.example` — полный список всех переменных
-
-## Ключевые переменные
-
-- `IFRE_DB_URL`: строка подключения PostgreSQL
-- `IFRE_DB_SCHEMA`: схема БД (обычно `references`)
-- `IFRE_AVG_SPEED_KMPH`: средняя скорость для ETA
-- `IFRE_MIN_SPEED_KMPH` / `IFRE_MAX_SPEED_KMPH`: фильтр мусорных скоростей
-- `IFRE_EDGE_WEIGHT_IN_METERS`: `1`, если веса рёбер в метрах
-- `IFRE_SCORE_POINTS_SCALE`: масштаб перевода внутренней стоимости в score 0–100
-- `IFRE_GRAPH_BIDIRECTIONAL`: `true/false` — форсировать двунаправленный граф
-- `IFRE_GRAPH_BIDIRECTIONAL_THRESHOLD`: порог авто‑детекта
-- `IFRE_TASK_DOCUMENT_CODES`: коды документов EAV для задач
-- `IFRE_EAV_MAPPING_FILE`: JSON‑маппинг полей EAV
-- `IFRE_COMPATIBILITY_STRICT`: строгая совместимость (несовместимые исключаются)
-- `IFRE_COMPATIBILITY_PENALTY`: штраф за несовместимость в soft‑режиме
-- `IFRE_USE_SNAPSHOT_BY_PLANNING_DATE`: брать снапшоты техники ближе к дате планирования
-- `IFRE_ANCHOR_UNITS_AT_PLAN_START`: якорить доступность техники на старт планирования
-- `IFRE_ASSIGNMENTS_GROUPING`: включить multi‑stop группировку в batch‑планировании
-- `IFRE_MAX_TOTAL_TIME_MINUTES_DEFAULT`: дефолтный лимит одного выезда (multi‑stop) в минутах; если в запросе не передан `max_total_time_minutes`, используется это значение (рекомендуется ставить длину смены)
-- `IFRE_REASON_AI_ENABLED`: включить AI‑переформулировку поля `reason`
-- `IFRE_REASON_AI_API_URL`: endpoint LLM API
-- `IFRE_REASON_AI_MODEL`: модель (например, `qwen3`)
-- `IFRE_REASON_AI_API_KEY`: API‑ключ
-- `IFRE_REASON_AI_TIMEOUT_SEC`: таймаут вызова LLM
 
 ## Данные и соответствие ТЗ
 
 Используются данные БД:
 
 - `references.road_nodes`, `references.road_edges` — граф дорог
-- `references.wells` — точки назначения (uwi, lon/lat)
+- `references.wells` — скважины (uwi, lon/lat)
 - `references.wialon_units_snapshot_*` — позиции техники
-- `tasks` (если есть) или EAV‑схема `dcm.records` + `dcm.record_indicator_values`
+- `tasks` (если есть) или EAV `dcm.records` + `dcm.record_indicator_values`
 
-Если таблицы `tasks` нет, сервис собирает заявки из EAV по `IFRE_TASK_DOCUMENT_CODES`.
+Если таблицы `tasks` нет, заявки собираются из EAV по `IFRE_TASK_DOCUMENT_CODES`.
 Записи без валидной скважины исключаются (см. `/api/tasks/debug`).
-
-## Совместимость техники (4.6)
-
-Словарь совместимости строится из EAV:
-
-- пары `WKIND` (тип работ) ↔ `VEHKIND` (тип техники)
-- тип техники подтягивается по техкарточкам (`TRS_VEHCARD_SNUM` → `TRS_VEHCARD_CLASS`)
-
-Режимы:
-
-- `IFRE_COMPATIBILITY_STRICT=true` — несовместимые или `unknown` исключаются
-- `IFRE_COMPATIBILITY_STRICT=false` — несовместимые допускаются со штрафом
 
 ## Скоринг
 
-Скоринг минимизирует внутреннюю стоимость:
+Внутренняя стоимость:
 
-- расстояние
-- ETA
-- ожидание до planned_start
-- опоздание относительно SLA
+```
+cost = Wd*distance_km + We*eta_min + Ww*wait_min*priority_weight + Wl*late_min*priority_weight
+score = 100 / (1 + cost/IFRE_SCORE_POINTS_SCALE)
+```
 
-Весами управляют `IFRE_SCORE_W_*`.
+SLA‑дедлайны по приоритету:
+- high: +2 часа
+- medium: +5 часов
+- low: +12 часов
 
-Во внешний API возвращается понятный балл `score` в диапазоне `0..100` (выше = лучше),
-полученный из стоимости с масштабом `IFRE_SCORE_POINTS_SCALE`.
+## Совместимость
 
-`reason` можно автоматически переформулировать через LLM (понятный русский текст)
-для `recommendations`, `assignments` и `multitask`.
+Если есть словарь совместимости:
+- `IFRE_COMPATIBILITY_STRICT=true` — несовместимые исключаются
+- `IFRE_COMPATIBILITY_STRICT=false` — допускаются со штрафом `IFRE_COMPATIBILITY_PENALTY`
 
 ## Эндпоинты
 
@@ -133,87 +112,115 @@ uvicorn app.main:app --reload
 - `POST /api/assignments`
 - `GET /api/tasks`
 - `GET /api/tasks/debug`
-- `GET /demo/route-map?wialon_id=...&uwi=...`
-- `GET /demo/batch-plan?start_date=YYYY-MM-DD&shift=day|night`
+- `GET /demo/route-map`
+- `GET /demo/batch-plan`
 
-Схемы запросов/ответов — в `app/models/schemas.py`.
+## Демонстрация: 3 сценария
 
-`POST /api/assignments` принимает флаг `grouping` (`true/false`).
-Если не задан — используется `IFRE_ASSIGNMENTS_GROUPING`.
+### Сценарий 1 — срочная заявка (high)
 
-## Демо‑страницы
+Запрос:
 
-- Маршрут одной заявки:
-
-```
-http://127.0.0.1:8000/demo/route-map?wialon_id=1001&uwi=W-001
-```
-
-- Batch‑планирование (карта + таблицы):
-
-```
-http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-31&shift=night
-```
-
-Группировка включена по умолчанию. Чтобы отключить:
-
-```
-...&grouping=false
-```
-
-## Примеры запросов (curl)
-
-### 1) Рекомендации
-
-```
-curl -X POST "http://127.0.0.1:8000/api/recommendations?top_units=3" \
+```bash
+curl -X POST 'http://127.0.0.1:8000/api/recommendations?top_units=3' \
   -H 'Content-Type: application/json' \
   -d '{
-    "task_id": "12649",
-    "priority": "low",
-    "destination_uwi": "AIR_0003",
-    "planned_start": "2025-10-29T08:00:00",
-    "duration_hours": 1
+    "task_id":"10067",
+    "priority":"high",
+    "destination_uwi":"JET_4055",
+    "planned_start":"2025-07-31T20:00:00",
+    "duration_hours":11.0,
+    "task_type":"Опрессовка кондуктора Ø 245 мм"
   }'
 ```
 
-### 2) Маршрут по графу
+Маршрут (топ‑1 техника):
 
 ```
-curl -X POST http://127.0.0.1:8000/api/route \
+http://127.0.0.1:8000/demo/route-map?wialon_id=29935360&uwi=JET_4055
+```
+
+Ожидаемо: система выбирает технику и даёт короткое объяснение (ETA, SLA, совместимость).
+
+### Сценарий 2 — сравнение baseline vs optimized
+
+Чтобы увидеть различия, включите более реалистичную доступность техники:
+
+```
+IFRE_ANCHOR_UNITS_AT_PLAN_START=false
+```
+
+Два запроса на одну заявку:
+
+```bash
+# optimized
+curl -X POST 'http://127.0.0.1:8000/api/recommendations?top_units=1' \
   -H 'Content-Type: application/json' \
-  -d '{"from":{"wialon_id":29935360},"to":{"uwi":"AIR_0003"}}'
-```
+  -d '{
+    "task_id":"12635",
+    "priority":"medium",
+    "destination_uwi":"JET_4416",
+    "planned_start":"2025-09-07T20:00:00",
+    "duration_hours":2.0,
+    "task_type":"СК3-2-5 Телеметрия"
+  }'
 
-### 3) Matrix
-
-```
-curl -X POST http://127.0.0.1:8000/api/matrix \
+# baseline
+curl -X POST 'http://127.0.0.1:8000/api/recommendations?top_units=1' \
   -H 'Content-Type: application/json' \
-  -d '{"start_nodes":[3840],"end_nodes":[2977]}'
+  -d '{
+    "task_id":"12635",
+    "priority":"medium",
+    "destination_uwi":"JET_4416",
+    "planned_start":"2025-09-07T20:00:00",
+    "duration_hours":2.0,
+    "task_type":"СК3-2-5 Телеметрия",
+    "mode":"baseline"
+  }'
 ```
 
-### 4) Multitask
+Визуализация двух маршрутов:
 
 ```
+http://127.0.0.1:8000/demo/route-map?wialon_id=26455455&uwi=JET_4416
+http://127.0.0.1:8000/demo/route-map?wialon_id=29935360&uwi=JET_4416
+```
+
+Ожидаемо: baseline выбирает ближайшую по расстоянию, optimized учитывает доступность и SLA.
+
+### Сценарий 3 — многозадачность (3 заявки рядом)
+
+Сравниваем группировку и раздельное обслуживание:
+
+```bash
 curl -X POST http://127.0.0.1:8000/api/multitask \
   -H 'Content-Type: application/json' \
   -d '{
     "task_ids":["12649","12653","12686"],
-    "constraints":{"max_total_time_minutes":480,"max_detour_ratio":1.3}
+    "constraints":{"max_total_time_minutes":20000,"max_detour_ratio":1.3}
   }'
 ```
 
-### 5) Batch‑планирование
+Витрина с группировкой:
 
 ```
-curl -X POST http://127.0.0.1:8000/api/assignments \
-  -H 'Content-Type: application/json' \
-  -d '{"filters":{"start_date":"2025-10-29","end_date":"2025-11-05"},"grouping":true}'
+http://127.0.0.1:8000/demo/batch-plan?task_ids=12649,12653,12686&grouping=true&max_total_time_minutes=20000&max_detour_ratio=1.3
 ```
+
+Витрина без группировки:
+
+```
+http://127.0.0.1:8000/demo/batch-plan?task_ids=12649,12653,12686&grouping=false&max_total_time_minutes=20000&max_detour_ratio=1.3
+```
+
+Ожидаемо: при `grouping=true` задачи объединяются в один выезд (одна техника), экономия показывается в `reason`.
 
 ## Диагностика
 
 - `GET /api/tasks/debug` — почему часть записей не попала в задачи
-- Ошибки БД или отсутствующие таблицы приводят к явным исключениям
-- Для тяжёлых сценариев уменьшайте диапазон дат и `limit`
+- Ошибки отсутствующих таблиц не скрываются
+
+## Ограничения и планы
+
+- Качество графа и снапшотов напрямую влияет на маршрут и SLA
+- При наличии фактической истории можно добавить ML‑прогноз ETA/длительности
