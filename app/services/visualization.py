@@ -53,6 +53,8 @@ def batch_plan_html(
     assignments: Sequence[AssignmentItem],
     unassigned: Sequence[UnassignedItem],
     summary: str | None = None,
+    multitask_reason: str | None = None,
+    grouped_task_map: Dict[str, int] | None = None,
 ) -> str:
     coords = [coord for item in assignments for coord in item.route_coords if len(coord) >= 2]
     if coords:
@@ -136,7 +138,7 @@ def batch_plan_html(
     polyline_js = _build_polyline_js(polyline_vars, polyline_colors, fmap.get_name())
     if polyline_js:
         fmap.get_root().script.add_child(Element(polyline_js))
-    table_html = _batch_table_html(assignments, unassigned, summary)
+    table_html = _batch_table_html(assignments, unassigned, summary, multitask_reason, grouped_task_map or {})
     fmap.get_root().html.add_child(Element(table_html))
 
     return fmap.get_root().render()
@@ -223,19 +225,36 @@ def _batch_table_html(
     assignments: Sequence[AssignmentItem],
     unassigned: Sequence[UnassignedItem],
     summary: str | None,
+    multitask_reason: str | None,
+    grouped_task_map: Dict[str, int],
 ) -> str:
+    group_palette = [
+        "#e8f4ff",
+        "#ecfdf3",
+        "#fff7e6",
+        "#f5efff",
+        "#ffeef3",
+        "#eef2ff",
+    ]
     assigned_rows = []
     for item in assignments:
         duration_hours = max(0.0, item.planned_duration_hours)
         dur_label = f"{duration_hours:.1f} ч"
         bar_width = max(20, min(120, int(round(duration_hours * 10))))
+        group_idx = grouped_task_map.get(item.task_id)
+        row_class = "assign-row"
+        row_style = ""
+        if group_idx is not None:
+            row_class = "assign-row grouped"
+            color = group_palette[group_idx % len(group_palette)]
+            row_style = f' style="--group-bg:{color};"'
         assigned_rows.append(
-            f'<tr class="assign-row" data-task="{escape(item.task_id)}">'
+            f'<tr class="{row_class}" data-task="{escape(item.task_id)}"{row_style}>'
             f"<td>{escape(item.task_id)}</td>"
             f"<td>{item.wialon_id}</td>"
             f"<td>{item.eta_minutes}</td>"
             f"<td>{item.distance_km:.2f}</td>"
-            f"<td>{item.score:.3f}</td>"
+            f"<td>{item.score:.1f}</td>"
             f"<td>{escape(item.reason)}</td>"
             f'<td><div class="dur-wrap"><div class="dur-bar" style="width: {bar_width}px;"></div>'
             f'<span class="dur-text">{dur_label}</span></div></td>'
@@ -259,9 +278,11 @@ def _batch_table_html(
         unassigned_rows.append('<tr><td colspan="2">Нет неназначенных задач</td></tr>')
 
     summary_text = escape(summary) if summary else "н/д"
+    multitask_reason_text = escape(multitask_reason) if multitask_reason else ""
     template = Template(_load_template("batch_plan.html"))
     return template.safe_substitute(
         summary_text=summary_text,
+        multitask_reason=multitask_reason_text,
         assigned_count=str(len(assignments)),
         unassigned_count=str(len(unassigned)),
         assigned_rows="".join(assigned_rows),

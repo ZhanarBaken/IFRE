@@ -66,6 +66,7 @@ uvicorn app.main:app --reload
 - `IFRE_AVG_SPEED_KMPH`: средняя скорость для ETA
 - `IFRE_MIN_SPEED_KMPH` / `IFRE_MAX_SPEED_KMPH`: фильтр мусорных скоростей
 - `IFRE_EDGE_WEIGHT_IN_METERS`: `1`, если веса рёбер в метрах
+- `IFRE_SCORE_POINTS_SCALE`: масштаб перевода внутренней стоимости в score 0–100
 - `IFRE_GRAPH_BIDIRECTIONAL`: `true/false` — форсировать двунаправленный граф
 - `IFRE_GRAPH_BIDIRECTIONAL_THRESHOLD`: порог авто‑детекта
 - `IFRE_TASK_DOCUMENT_CODES`: коды документов EAV для задач
@@ -75,6 +76,12 @@ uvicorn app.main:app --reload
 - `IFRE_USE_SNAPSHOT_BY_PLANNING_DATE`: брать снапшоты техники ближе к дате планирования
 - `IFRE_ANCHOR_UNITS_AT_PLAN_START`: якорить доступность техники на старт планирования
 - `IFRE_ASSIGNMENTS_GROUPING`: включить multi‑stop группировку в batch‑планировании
+- `IFRE_MAX_TOTAL_TIME_MINUTES_DEFAULT`: дефолтный лимит одного выезда (multi‑stop) в минутах; если в запросе не передан `max_total_time_minutes`, используется это значение (рекомендуется ставить длину смены)
+- `IFRE_REASON_AI_ENABLED`: включить AI‑переформулировку поля `reason`
+- `IFRE_REASON_AI_API_URL`: endpoint LLM API
+- `IFRE_REASON_AI_MODEL`: модель (например, `qwen3`)
+- `IFRE_REASON_AI_API_KEY`: API‑ключ
+- `IFRE_REASON_AI_TIMEOUT_SEC`: таймаут вызова LLM
 
 ## Данные и соответствие ТЗ
 
@@ -102,7 +109,7 @@ uvicorn app.main:app --reload
 
 ## Скоринг
 
-Скоринг минимизирует стоимость:
+Скоринг минимизирует внутреннюю стоимость:
 
 - расстояние
 - ETA
@@ -110,6 +117,12 @@ uvicorn app.main:app --reload
 - опоздание относительно SLA
 
 Весами управляют `IFRE_SCORE_W_*`.
+
+Во внешний API возвращается понятный балл `score` в диапазоне `0..100` (выше = лучше),
+полученный из стоимости с масштабом `IFRE_SCORE_POINTS_SCALE`.
+
+`reason` можно автоматически переформулировать через LLM (понятный русский текст)
+для `recommendations`, `assignments` и `multitask`.
 
 ## Эндпоинты
 
@@ -153,7 +166,7 @@ http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-31&shift=night
 ### 1) Рекомендации
 
 ```
-curl -X POST http://127.0.0.1:8000/api/recommendations \
+curl -X POST "http://127.0.0.1:8000/api/recommendations?top_units=3" \
   -H 'Content-Type: application/json' \
   -d '{
     "task_id": "12649",

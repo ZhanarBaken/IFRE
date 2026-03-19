@@ -2,6 +2,7 @@
   body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; }
   .batch-wrap { padding: 16px 20px 28px; }
   .batch-summary { margin: 0 0 12px; font-size: 14px; color: #52606d; }
+  .batch-reason { margin: 0 0 14px; font-size: 13px; color: #1f2933; background: #f8fafc; border: 1px solid #d9e2ec; padding: 10px 12px; border-radius: 6px; }
   table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; font-size: 13px; }
   th, td { border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; }
   th { background: #f5f7fa; }
@@ -9,14 +10,18 @@
   .folium-map { width: 100% !important; height: 70vh !important; min-height: 620px; }
   .leaflet-container { width: 100% !important; height: 70vh !important; min-height: 620px; }
   tr.assign-row { cursor: pointer; }
-  tr.assign-row.active { background: #fff7cc; }
+  tr.assign-row.grouped td { background: var(--group-bg, #eef6ff); }
+  tr.assign-row.active td { background: #fff7cc !important; }
   .dur-wrap { display: flex; align-items: center; gap: 6px; }
   .dur-bar { height: 8px; background: #3b82f6; border-radius: 999px; }
   .dur-text { color: #4b5563; font-size: 12px; white-space: nowrap; }
 </style>
 <div class="batch-wrap">
   <div class="batch-summary">
-    Сводка: $summary_text. Назначено: $assigned_count. Без назначения: $unassigned_count.
+    Назначено: $assigned_count. Без назначения: $unassigned_count.
+  </div>
+  <div class="batch-reason">
+    Причина группировки: $multitask_reason
   </div>
   <h2>Назначенные задачи</h2>
   <table>
@@ -26,7 +31,7 @@
         <th>ID техники</th>
         <th>ETA, мин</th>
         <th>Дистанция, км</th>
-        <th>Скор</th>
+        <th>Скор (0-100)</th>
         <th>Причина</th>
         <th>Длит., ч (из задачи)</th>
         <th>План</th>

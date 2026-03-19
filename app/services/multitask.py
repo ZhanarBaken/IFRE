@@ -8,6 +8,7 @@ from app.data.repositories.base import BaseRepository
 from app.models.schemas import Task, TaskFilters
 from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
+from app.services.reason_ai import ReasonAIService
 from app.services.routing import RoutingService
 from app.utils.geo import distance_km
 
@@ -17,6 +18,7 @@ class MultitaskService:
         self.repo = repo
         self.routing = routing
         self.duration_forecaster = DurationForecaster(repo)
+        self.reason_ai = ReasonAIService()
 
     def evaluate(self, task_ids: List[str] | None, filters: TaskFilters | None, max_total_time_minutes: int, max_detour_ratio: float):
         tasks = self._load_tasks(task_ids, filters)
@@ -51,7 +53,20 @@ class MultitaskService:
         if len(groups) == 1 and len(tasks) > 1:
             strategy = "single_unit"
 
-        reason = "grouping based on proximity, detour, shift and compatibility constraints"
+        reason = self._build_reason(
+            groups=groups,
+            tasks=tasks,
+            wells_map=wells_map,
+            strategy=strategy,
+            total_distance_km=total_distance_km,
+            total_time_minutes=total_time_minutes,
+            baseline_distance_km=baseline_distance_km,
+            baseline_time_minutes=baseline_time_minutes,
+            savings_percent=savings_percent,
+            max_total_time_minutes=max_total_time_minutes,
+            max_detour_ratio=max_detour_ratio,
+        )
+        reason = self.reason_ai.rewrite_one(reason, context=f"multitask_{strategy}")
         return {
             "groups": [[t.task_id for t in group] for group in groups],
             "strategy_summary": strategy,
@@ -302,6 +317,7 @@ class MultitaskService:
         return total_distance, total_time
 
     def _empty(self, reason: str = "no tasks"):
+        reason_text = self.reason_ai.rewrite_one(reason, context="multitask_empty")
         return {
             "groups": [],
             "strategy_summary": "separate",
@@ -310,5 +326,81 @@ class MultitaskService:
             "baseline_distance_km": 0.0,
             "baseline_time_minutes": 0,
             "savings_percent": 0.0,
-            "reason": reason,
+            "reason": reason_text,
         }
+
+    def _build_reason(
+        self,
+        groups,
+        tasks,
+        wells_map,
+        strategy: str,
+        total_distance_km: float,
+        total_time_minutes: float,
+        baseline_distance_km: float,
+        baseline_time_minutes: float,
+        savings_percent: float,
+        max_total_time_minutes: int,
+        max_detour_ratio: float,
+    ) -> str:
+        merged_groups = [group for group in groups if len(group) > 1]
+        merged_labels = [",".join(task.task_id for task in group) for group in merged_groups]
+        min_pair_km = self._min_pair_distance_km(tasks, wells_map)
+        saved_km = baseline_distance_km - total_distance_km
+        saved_min = baseline_time_minutes - total_time_minutes
+
+        if strategy == "single_unit":
+            ids = ",".join(task.task_id for task in groups[0]) if groups else ""
+            diameter = self._group_diameter_km(groups[0], wells_map) if groups else 0.0
+            detour_percent = max(0.0, (max_detour_ratio - 1.0) * 100.0)
+            return (
+                f"все заявки {ids} расположены компактно (радиус около {diameter:.1f} км), "
+                f"поэтому выполнены одним выездом; крюк в пределах лимита {detour_percent:.0f}%. "
+                f"Экономия {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
+            )
+
+        if strategy == "mixed":
+            merged_text = "; ".join(merged_labels) if merged_labels else "часть заявок"
+            first = merged_groups[0] if merged_groups else None
+            first_diameter = self._group_diameter_km(first, wells_map) if first else 0.0
+            return (
+                f"объединены заявки {merged_text} (внутри группы точки рядом: около {first_diameter:.1f} км). "
+                f"Остальные оставлены отдельно, потому что объединение превышает ограничения "
+                f"max_detour_ratio={max_detour_ratio} или max_total_time_minutes={max_total_time_minutes}. "
+                f"Итоговая экономия {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
+            )
+
+        # separate
+        min_pair_text = f"{min_pair_km:.1f} км" if min_pair_km is not None else "н/д"
+        return (
+            f"задачи оставлены раздельно: минимальное расстояние между парами {min_pair_text}, "
+            f"а объединение не проходит по ограничениям "
+            f"max_detour_ratio={max_detour_ratio} и max_total_time_minutes={max_total_time_minutes}. "
+            f"Экономия относительно baseline отсутствует ({savings_percent:.1f}%)."
+        )
+
+    def _min_pair_distance_km(self, tasks, wells_map) -> float | None:
+        if len(tasks) < 2:
+            return 0.0
+        min_dist = None
+        for i in range(len(tasks)):
+            for j in range(i + 1, len(tasks)):
+                a = wells_map[tasks[i].destination_uwi]
+                b = wells_map[tasks[j].destination_uwi]
+                d = distance_km(a.lon, a.lat, b.lon, b.lat)
+                if min_dist is None or d < min_dist:
+                    min_dist = d
+        return min_dist
+
+    def _group_diameter_km(self, group, wells_map) -> float:
+        if not group or len(group) < 2:
+            return 0.0
+        max_dist = 0.0
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                a = wells_map[group[i].destination_uwi]
+                b = wells_map[group[j].destination_uwi]
+                d = distance_km(a.lon, a.lat, b.lon, b.lat)
+                if d > max_dist:
+                    max_dist = d
+        return max_dist

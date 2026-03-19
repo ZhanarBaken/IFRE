@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import List
 
 from app.core.config import settings
@@ -8,8 +9,9 @@ from app.models.schemas import RecommendationUnit, Task
 from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
 from app.services.fleet_state import FleetStateService
+from app.services.reason_ai import ReasonAIService
 from app.services.routing import RoutingService
-from app.services.scoring import score_task
+from app.services.scoring import score_task, score_to_points
 
 
 class RecommendationService:
@@ -18,6 +20,7 @@ class RecommendationService:
         self.routing = routing
         self.fleet_state = FleetStateService(repo, routing)
         self.duration_forecaster = DurationForecaster(repo)
+        self.reason_ai = ReasonAIService()
 
     def recommend(
         self,
@@ -46,12 +49,10 @@ class RecommendationService:
         if mode_norm == "baseline":
             return self._recommend_baseline(units_state, well, task_type, planned_start, has_rules, compat, compat_norm)
 
-        candidates: List[RecommendationUnit] = []
+        candidates: list[dict] = []
         task_for_score = self._task_for_scoring(
             task_id, priority, destination_uwi, task_type, planned_start, duration_hours
         )
-
-        unit_availability = {u.wialon_id: u.available_at.isoformat() for u in units_state.values()}
 
         for unit in units_state.values():
             status = True
@@ -79,19 +80,40 @@ class RecommendationService:
                 compatibility_penalty=compat_penalty,
             )
 
+            release_minutes = self._release_minutes(unit.available_at, planned_start)
             candidates.append(
-                RecommendationUnit(
-                    wialon_id=unit.wialon_id,
-                    name=unit.name,
-                    eta_minutes=int(round(travel_minutes)),
-                    distance_km=round(distance_km, 2),
-                    score=score_result.score,
-                    reason=score_result.reason,
-                )
+                {
+                    "wialon_id": unit.wialon_id,
+                    "name": unit.name,
+                    "eta_minutes": int(round(travel_minutes)),
+                    "distance_km": round(distance_km, 2),
+                    "score": score_result.score,
+                    "wait_minutes": score_result.wait_minutes,
+                    "late_minutes": score_result.late_minutes,
+                    "release_minutes": release_minutes,
+                    "compat_penalty": compat_penalty,
+                    "compatible": not (has_rules and status is False),
+                }
             )
 
-        candidates.sort(key=lambda x: x.score, reverse=True)
-        return candidates[:3]
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        top_raw = candidates[:3]
+        best_distance = top_raw[0]["distance_km"] if top_raw else None
+        top: List[RecommendationUnit] = []
+        for idx, cand in enumerate(top_raw):
+            reason = self._build_recommendation_reason(cand, idx, best_distance)
+            top.append(
+                RecommendationUnit(
+                    wialon_id=cand["wialon_id"],
+                    name=cand["name"],
+                    eta_minutes=cand["eta_minutes"],
+                    distance_km=cand["distance_km"],
+                    score=cand["score"],
+                    reason=reason,
+                )
+            )
+        self._rewrite_reasons(top, context="recommendations")
+        return top
 
     def _well(self, uwi: str):
         wells = self.repo.wells_by_uwi([uwi])
@@ -152,7 +174,7 @@ class RecommendationService:
         compat,
         compat_norm,
     ):
-        candidates: List[RecommendationUnit] = []
+        candidates: list[dict] = []
         for unit in units_state.values():
             if has_rules and task_type:
                 status = compatibility_status(task_type, unit.unit_type, compat, compat_norm)
@@ -167,19 +189,86 @@ class RecommendationService:
             wait_minutes = 0
             if planned_start is not None:
                 wait_minutes = max(0, int((unit.available_at - planned_start).total_seconds() / 60.0))
-            reason = "baseline: nearest by distance"
-            if wait_minutes > 0:
-                reason = f"{reason}, waits {wait_minutes} min"
-            score = 1.0 / (1.0 + distance_km)
+            score = score_to_points(distance_km)
             candidates.append(
+                {
+                    "wialon_id": unit.wialon_id,
+                    "name": unit.name,
+                    "eta_minutes": int(round(travel_minutes)),
+                    "distance_km": round(distance_km, 2),
+                    "score": score,
+                    "wait_minutes": wait_minutes,
+                }
+            )
+        candidates.sort(key=lambda x: x["distance_km"])
+        top_raw = candidates[:3]
+        best_distance = top_raw[0]["distance_km"] if top_raw else None
+        top: List[RecommendationUnit] = []
+        for idx, cand in enumerate(top_raw):
+            reason = self._build_baseline_reason(cand, idx, best_distance)
+            top.append(
                 RecommendationUnit(
-                    wialon_id=unit.wialon_id,
-                    name=unit.name,
-                    eta_minutes=int(round(travel_minutes)),
-                    distance_km=round(distance_km, 2),
-                    score=round(score, 3),
+                    wialon_id=cand["wialon_id"],
+                    name=cand["name"],
+                    eta_minutes=cand["eta_minutes"],
+                    distance_km=cand["distance_km"],
+                    score=cand["score"],
                     reason=reason,
                 )
             )
-        candidates.sort(key=lambda x: x.distance_km)
-        return candidates[:3]
+        self._rewrite_reasons(top, context="recommendations_baseline")
+        return top
+
+    def _rewrite_reasons(self, units: List[RecommendationUnit], context: str) -> None:
+        if not units:
+            return
+        rewritten = self.reason_ai.rewrite_many([item.reason or "" for item in units], context=context)
+        if len(rewritten) != len(units):
+            return
+        for item, reason in zip(units, rewritten):
+            item.reason = reason
+
+    def _release_minutes(self, unit_available_at: datetime, planned_start: datetime | None) -> int:
+        if planned_start is None:
+            return 0
+        return max(0, int((unit_available_at - planned_start).total_seconds() / 60.0))
+
+    def _build_recommendation_reason(self, c: dict, rank: int, best_distance: float | None) -> str:
+        distance = float(c["distance_km"])
+        eta = int(c["eta_minutes"])
+        wait = int(c["wait_minutes"])
+        late = int(c["late_minutes"])
+        release = int(c["release_minutes"])
+        compat_penalty = float(c["compat_penalty"])
+        compatible = bool(c["compatible"])
+        delta_km = 0.0 if best_distance is None else max(0.0, distance - best_distance)
+
+        if rank == 0 and wait == 0 and compatible and compat_penalty <= 0:
+            base = "ближайшая свободная, совместима по типу работ"
+        elif wait > 0:
+            base = f"занята, освободится через {release} мин, затем прибудет за {eta} мин"
+        else:
+            base = f"свободна, ETA {eta} мин"
+
+        parts = [base]
+        if rank > 0 and delta_km > 0:
+            parts.append(f"дальше лидера на {delta_km:.1f} км")
+        elif rank == 0 and distance > 0:
+            parts.append(f"маршрут {distance:.1f} км")
+        if late > 0:
+            parts.append(f"ожидаемое опоздание по SLA {late} мин")
+        if compat_penalty > 0:
+            parts.append("допущена с штрафом за несовместимость")
+        return ", ".join(parts)
+
+    def _build_baseline_reason(self, c: dict, rank: int, best_distance: float | None) -> str:
+        distance = float(c["distance_km"])
+        wait = int(c["wait_minutes"])
+        delta_km = 0.0 if best_distance is None else max(0.0, distance - best_distance)
+        if rank == 0:
+            base = "baseline: ближайшая по расстоянию"
+        else:
+            base = f"baseline: дальше лидера на {delta_km:.1f} км"
+        if wait > 0:
+            return f"{base}, ожидание {wait} мин"
+        return base

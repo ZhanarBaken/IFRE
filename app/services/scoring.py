@@ -19,6 +19,13 @@ class ScoreResult:
     end_time: datetime
 
 
+def score_to_points(cost: float) -> float:
+    # Human-readable score in 0..100 range (higher is better).
+    scale = max(0.1, settings.score_points_scale)
+    points = 100.0 / (1.0 + (cost / scale))
+    return round(points, 1)
+
+
 def priority_deadline_hours(priority: str) -> int:
     return {"high": 2, "medium": 5, "low": 12}.get(priority, 5)
 
@@ -58,26 +65,31 @@ def score_task(
     late_minutes = max(0, int((start_time - deadline).total_seconds() / 60.0))
     prio_weight = priority_weight(task.priority)
 
-    # Cost model
-    cost = (
-        settings.score_w_distance * distance_km
-        + settings.score_w_eta * travel_minutes
-        + settings.score_w_wait * wait_minutes * prio_weight
-        + settings.score_w_late * late_minutes * prio_weight
-    )
+    # Cost model (all factors are explicit to keep reason explainable)
+    distance_cost = settings.score_w_distance * distance_km
+    eta_cost = settings.score_w_eta * travel_minutes
+    wait_cost = settings.score_w_wait * wait_minutes * prio_weight
+    late_cost = settings.score_w_late * late_minutes * prio_weight
+    cost = distance_cost + eta_cost + wait_cost + late_cost
     if compatibility_penalty:
         cost += compatibility_penalty
 
-    score = 1.0 / (1.0 + cost)
+    score = score_to_points(cost)
     reason = (
-        f"dist {distance_km:.2f} km, eta {travel_minutes} min, "
-        f"wait {wait_minutes} min, late {late_minutes} min, prio {task.priority}"
+        f"факторы: расстояние {distance_km:.2f} км (вклад {distance_cost:.2f}), "
+        f"время в пути {travel_minutes} мин (вклад {eta_cost:.2f}), "
+        f"ожидание {wait_minutes} мин (вклад {wait_cost:.2f}), "
+        f"SLA-опоздание {late_minutes} мин (вклад {late_cost:.2f}), "
+        f"приоритет {task.priority}. "
+        f"план {planned_start.isoformat()}, дедлайн {deadline.isoformat()}, "
+        f"доступность техники {unit_available_at.isoformat()}, старт {start_time.isoformat()}."
     )
     if compatibility_penalty:
-        reason = f"{reason}, compat_penalty {compatibility_penalty:.2f}"
+        reason = f"{reason} штраф совместимости {compatibility_penalty:.2f}."
+    reason = f"{reason} итоговая стоимость {cost:.2f}, балл {score:.1f}/100."
     end_time = start_time + timedelta(hours=task.duration_hours)
     return ScoreResult(
-        score=round(score, 3),
+        score=score,
         cost=cost,
         reason=reason,
         eta_minutes=travel_minutes,

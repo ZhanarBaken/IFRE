@@ -9,6 +9,7 @@ from app.models.schemas import AssignmentItem, AssignmentResponse, Task, TaskFil
 from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
 from app.services.fleet_state import FleetStateService
+from app.services.reason_ai import ReasonAIService
 from app.services.routing import RoutingService
 from app.services.scoring import score_task
 
@@ -19,6 +20,7 @@ class AssignmentService:
         self.routing = routing
         self.fleet_state = FleetStateService(repo, routing)
         self.duration_forecaster = DurationForecaster(repo)
+        self.reason_ai = ReasonAIService()
 
     def plan(
         self,
@@ -68,9 +70,32 @@ class AssignmentService:
                 compat_norm,
             )
         unassigned.extend(extra_unassigned)
+        self._rewrite_reasons(assignments, unassigned)
 
         summary = "assigned" if assignments else "no assignments"
         return AssignmentResponse(assignments=assignments, unassigned=unassigned, summary=summary)
+
+    def _rewrite_reasons(
+        self,
+        assignments: List[AssignmentItem],
+        unassigned: List[UnassignedItem],
+    ) -> None:
+        if assignments:
+            assignment_reasons = self.reason_ai.rewrite_many(
+                [item.reason for item in assignments],
+                context="assignments_assigned",
+            )
+            if len(assignment_reasons) == len(assignments):
+                for item, reason in zip(assignments, assignment_reasons):
+                    item.reason = reason
+        if unassigned:
+            unassigned_reasons = self.reason_ai.rewrite_many(
+                [item.reason for item in unassigned],
+                context="assignments_unassigned",
+            )
+            if len(unassigned_reasons) == len(unassigned):
+                for item, reason in zip(unassigned, unassigned_reasons):
+                    item.reason = reason
 
     def _plan_grouped(
         self,
@@ -117,9 +142,24 @@ class AssignmentService:
                 unit_minutes,
             )
             if not plan_items:
-                fallback_reason = _reason or "no_feasible_unit"
+                group_reason = self._group_failure_reason(
+                    group=group,
+                    wells_map=wells_map,
+                    task_nodes=task_nodes,
+                    unit_state=unit_state,
+                    has_rules=has_rules,
+                    compat=compat,
+                    compat_norm=compat_norm,
+                    max_total_time_minutes=max_total_time_minutes,
+                    unit_minutes=unit_minutes,
+                )
                 for task in group:
-                    unassigned.append(UnassignedItem(task_id=task.task_id, reason=fallback_reason))
+                    unassigned.append(
+                        UnassignedItem(
+                            task_id=task.task_id,
+                            reason=group_reason,
+                        )
+                    )
                 continue
 
             assignments.extend(plan_items)
@@ -294,7 +334,12 @@ class AssignmentService:
                     reason = self._unassigned_reason(
                         task, wells_map, task_nodes, unit_state, has_rules, compat, compat_norm, max_total_time_minutes, unit_minutes
                     )
-                    unassigned.append(UnassignedItem(task_id=task.task_id, reason=reason))
+                    unassigned.append(
+                        UnassignedItem(
+                            task_id=task.task_id,
+                            reason=reason,
+                        )
+                    )
                 break
 
             task = best["task"]
@@ -341,13 +386,21 @@ class AssignmentService:
         max_total_time_minutes: int,
         unit_minutes: Dict[int, float],
     ) -> str:
+        total_units = len(unit_state)
         if not unit_state:
-            return "no_units"
+            return "Не назначена: в снапшоте нет доступной техники."
         task_node = task_nodes.get(task.task_id)
         if task_node is None:
-            return "no_task_node"
-        any_compatible = False
-        any_path = False
+            return f"Не назначена: для скважины {task.destination_uwi} не найден узел дорожного графа."
+
+        compatible_units = 0
+        with_path_units = 0
+        over_limit_units = 0
+        min_projected = None
+        min_projected_unit = None
+        best_distance = None
+        best_eta = None
+
         for unit in unit_state.values():
             status = True
             if has_rules:
@@ -355,26 +408,152 @@ class AssignmentService:
                 if status is False or status is None:
                     if settings.compatibility_strict:
                         continue
-            any_compatible = True
+            compatible_units += 1
 
             route = self.routing.route_between_nodes_or_none(
                 unit.node_id, task_node, speed_kmph=unit.speed_kmph
             )
             if route is None:
                 continue
+            with_path_units += 1
+
+            distance_km = route["distance_km"]
             travel_minutes = route["time_minutes"]
+            if best_distance is None or distance_km < best_distance:
+                best_distance = distance_km
+            if best_eta is None or travel_minutes < best_eta:
+                best_eta = travel_minutes
+
             if unit_minutes.get(unit.wialon_id, 0.0) > 0 and max_total_time_minutes:
                 projected = unit_minutes[unit.wialon_id] + travel_minutes + task.duration_hours * 60.0
                 if projected > max_total_time_minutes:
+                    over_limit_units += 1
+                    if min_projected is None or projected < min_projected:
+                        min_projected = projected
+                        min_projected_unit = unit.wialon_id
                     continue
-            any_path = True
-            break
+            # If we got here, at least one feasible candidate exists.
+            return "Не назначена: в текущем шаге выбрана другая заявка с лучшим суммарным скором."
 
-        if not any_compatible:
-            return "no_compatible_unit"
-        if not any_path:
-            return "no_path"
-        return "no_feasible_unit"
+        if compatible_units == 0:
+            return (
+                f"Не назначена: нет совместимой техники для типа работ '{task.task_type}' "
+                f"(режим strict, проверено {total_units} ед. техники)."
+            )
+        if with_path_units == 0:
+            return (
+                f"Не назначена: для {compatible_units} совместимых машин не найден маршрут по графу "
+                f"до скважины {task.destination_uwi}."
+            )
+        if over_limit_units == with_path_units and max_total_time_minutes:
+            min_text = (
+                f"; минимально требуется {int(round(min_projected))} мин (машина {min_projected_unit})"
+                if min_projected is not None
+                else ""
+            )
+            return (
+                f"Не назначена: все {with_path_units} кандидатов превышают лимит выезда "
+                f"{max_total_time_minutes} мин{min_text}."
+            )
+
+        extra = []
+        if best_distance is not None:
+            extra.append(f"лучший маршрут {best_distance:.2f} км")
+        if best_eta is not None:
+            extra.append(f"лучший ETA {best_eta} мин")
+        suffix = f" ({', '.join(extra)})" if extra else ""
+        return (
+            "Не назначена: нет кандидата, который одновременно проходит ограничения "
+            f"совместимости/графа/времени{suffix}."
+        )
+
+    def _group_failure_reason(
+        self,
+        group: List[Task],
+        wells_map,
+        task_nodes: Dict[str, int],
+        unit_state: Dict[int, object],
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+        max_total_time_minutes: int,
+        unit_minutes: Dict[int, float],
+    ) -> str:
+        total_units = len(unit_state)
+        if total_units == 0:
+            return "Не назначена: в снапшоте нет доступной техники."
+
+        ordered = self._nearest_neighbor_order(group, wells_map)
+        compatible_units = 0
+        path_ok_units = 0
+        limit_block_units = 0
+        min_projected = None
+        no_path_units = 0
+
+        for unit_id, unit in unit_state.items():
+            if not self._is_unit_compatible(unit, ordered, has_rules, compat, compat_norm):
+                continue
+            compatible_units += 1
+
+            current_node = unit.node_id
+            used_minutes = unit_minutes.get(unit_id, 0.0)
+            projected = used_minutes
+            path_failed = False
+            for task in ordered:
+                task_node = task_nodes.get(task.task_id)
+                if task_node is None:
+                    path_failed = True
+                    break
+                route = self.routing.route_between_nodes_or_none(
+                    current_node, task_node, speed_kmph=unit.speed_kmph
+                )
+                if route is None:
+                    path_failed = True
+                    break
+                projected += route["time_minutes"] + task.duration_hours * 60.0
+                current_node = task_node
+            if path_failed:
+                no_path_units += 1
+                continue
+
+            path_ok_units += 1
+            if max_total_time_minutes and used_minutes > 0 and projected > max_total_time_minutes:
+                limit_block_units += 1
+                if min_projected is None or projected < min_projected:
+                    min_projected = projected
+
+        task_ids = ",".join(t.task_id for t in ordered)
+        if compatible_units == 0:
+            return (
+                f"Не назначена группа [{task_ids}]: нет совместимой техники "
+                f"(strict, проверено {total_units} ед.)."
+            )
+        if path_ok_units == 0:
+            return (
+                f"Не назначена группа [{task_ids}]: для {compatible_units} совместимых машин "
+                "не найден полный маршрут по графу."
+            )
+        if limit_block_units == path_ok_units and max_total_time_minutes:
+            min_text = (
+                f"; минимально требуется {int(round(min_projected))} мин"
+                if min_projected is not None
+                else ""
+            )
+            return (
+                f"Не назначена группа [{task_ids}]: все кандидаты превышают лимит выезда "
+                f"{max_total_time_minutes} мин{min_text}."
+            )
+        if no_path_units > 0 and limit_block_units > 0:
+            return (
+                f"Не назначена группа [{task_ids}]: часть машин без маршрута по графу "
+                f"({no_path_units}), часть превышает лимит времени ({limit_block_units})."
+            )
+        in_limit_units = max(0, path_ok_units - limit_block_units)
+        return (
+            f"Не назначена группа [{task_ids}]: нет кандидата, который одновременно "
+            "проходит совместимость, граф и лимиты времени. "
+            f"Проверено: совместимых {compatible_units}, с полным маршрутом {path_ok_units}, в лимите {in_limit_units}."
+        )
 
     def _can_add(
         self,
@@ -586,7 +765,7 @@ class AssignmentService:
                 best_total_minutes = total_minutes
 
         if best_unit_id is None or best_plan is None:
-            reason = "; ".join(sorted(fail_reasons)) if fail_reasons else "no feasible unit"
+            reason = "; ".join(sorted(fail_reasons)) if fail_reasons else "no_feasible_unit"
             return None, None, 0.0, reason
         return best_unit_id, best_plan, best_total_minutes, ""
 

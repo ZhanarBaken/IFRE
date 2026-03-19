@@ -68,7 +68,7 @@ class RecommendationUnit(BaseModel):
     name: str
     eta_minutes: int
     distance_km: float
-    score: float
+    score: float = Field(description="Итоговый балл кандидата от 0 до 100 (чем выше, тем лучше)")
     reason: Optional[str] = None
 
 
@@ -118,8 +118,8 @@ class MatrixResponse(BaseModel):
 
 
 class MultitaskConstraints(BaseModel):
-    max_total_time_minutes: int = 480
-    max_detour_ratio: float = 1.3
+    max_total_time_minutes: int | None = None
+    max_detour_ratio: float | None = None
 
 
 class TaskFilters(BaseModel):
@@ -147,7 +147,7 @@ class AssignmentItem(BaseModel):
     wialon_id: int
     eta_minutes: int
     distance_km: float
-    score: float
+    score: float = Field(description="Итоговый балл назначения от 0 до 100 (чем выше, тем лучше)")
     reason: str
     planned_duration_hours: float
     planned_start: datetime

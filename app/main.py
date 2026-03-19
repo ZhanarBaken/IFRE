@@ -106,7 +106,7 @@ async def matrix(req: MatrixRequest):
 
 
 @app.post("/api/recommendations", response_model=RecommendationResponse)
-async def recommendations(req: RecommendationRequest):
+async def recommendations(req: RecommendationRequest, top_units: int | None = 3):
     try:
         units = app.state.recommendations.recommend(
             task_id=req.task_id,
@@ -118,6 +118,8 @@ async def recommendations(req: RecommendationRequest):
             mode=req.mode,
             exclude_busy=req.exclude_busy,
         )
+        if top_units is not None and top_units > 0:
+            units = units[:top_units]
         return {"units": units}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -127,8 +129,16 @@ async def recommendations(req: RecommendationRequest):
 async def multitask(req: MultitaskRequest):
     try:
         constraints = req.constraints
-        max_total = constraints.max_total_time_minutes if constraints else 480
-        max_detour = constraints.max_detour_ratio if constraints else 1.3
+        max_total = (
+            constraints.max_total_time_minutes
+            if constraints and constraints.max_total_time_minutes is not None
+            else settings.max_total_time_minutes_default
+        )
+        max_detour = (
+            constraints.max_detour_ratio
+            if constraints and constraints.max_detour_ratio is not None
+            else 1.3
+        )
         payload = app.state.multitask.evaluate(req.task_ids, req.filters, max_total, max_detour)
         return payload
     except Exception as exc:
@@ -139,8 +149,16 @@ async def multitask(req: MultitaskRequest):
 async def assignments(req: AssignmentRequest):
     try:
         constraints = req.constraints
-        max_total = constraints.max_total_time_minutes if constraints else 480
-        max_detour = constraints.max_detour_ratio if constraints else 1.3
+        max_total = (
+            constraints.max_total_time_minutes
+            if constraints and constraints.max_total_time_minutes is not None
+            else settings.max_total_time_minutes_default
+        )
+        max_detour = (
+            constraints.max_detour_ratio
+            if constraints and constraints.max_detour_ratio is not None
+            else 1.3
+        )
         payload = app.state.assignments.plan(req.task_ids, req.filters, max_total, max_detour, grouping=req.grouping)
         return payload
     except Exception as exc:
@@ -234,8 +252,8 @@ async def demo_batch_plan(
     end_date: date | None = None,
     shift: str | None = None,
     limit: int = 20,
-    max_total_time_minutes: int = 480,
-    max_detour_ratio: float = 1.3,
+    max_total_time_minutes: int | None = None,
+    max_detour_ratio: float | None = None,
     grouping: bool | None = None,
     embed: bool = False,
 ):
@@ -294,13 +312,43 @@ async def demo_batch_plan(
         if grouping is None:
             grouping = True
 
+        effective_max_total = (
+            max_total_time_minutes if max_total_time_minutes is not None else settings.max_total_time_minutes_default
+        )
+        effective_max_detour = max_detour_ratio if max_detour_ratio is not None else 1.3
+
         payload = app.state.assignments.plan(
             parsed_ids,
             filters,
-            max_total_time_minutes,
-            max_detour_ratio,
+            effective_max_total,
+            effective_max_detour,
             grouping=grouping,
         )
-        return batch_plan_html(payload.assignments, payload.unassigned, summary=payload.summary)
+        multitask_reason = None
+        grouped_task_map: dict[str, int] = {}
+        if grouping:
+            try:
+                mt = app.state.multitask.evaluate(
+                    task_ids=parsed_ids,
+                    filters=filters,
+                    max_total_time_minutes=effective_max_total,
+                    max_detour_ratio=effective_max_detour,
+                )
+                multitask_reason = mt.get("reason")
+                raw_groups = mt.get("groups") or []
+                for idx, group in enumerate(raw_groups):
+                    if isinstance(group, list) and len(group) > 1:
+                        for task_id in group:
+                            grouped_task_map[str(task_id)] = idx
+            except Exception as exc:
+                multitask_reason = f"не удалось получить причину группировки: {exc}"
+
+        return batch_plan_html(
+            payload.assignments,
+            payload.unassigned,
+            summary=payload.summary,
+            multitask_reason=multitask_reason,
+            grouped_task_map=grouped_task_map,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
