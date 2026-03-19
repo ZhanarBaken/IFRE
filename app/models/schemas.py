@@ -149,6 +149,7 @@ class AssignmentItem(BaseModel):
     distance_km: float
     score: float
     reason: str
+    planned_duration_hours: float
     planned_start: datetime
     start_time: datetime
     end_time: datetime

@@ -226,6 +226,9 @@ def _batch_table_html(
 ) -> str:
     assigned_rows = []
     for item in assignments:
+        duration_hours = max(0.0, item.planned_duration_hours)
+        dur_label = f"{duration_hours:.1f} ч"
+        bar_width = max(20, min(120, int(round(duration_hours * 10))))
         assigned_rows.append(
             f'<tr class="assign-row" data-task="{escape(item.task_id)}">'
             f"<td>{escape(item.task_id)}</td>"
@@ -234,13 +237,15 @@ def _batch_table_html(
             f"<td>{item.distance_km:.2f}</td>"
             f"<td>{item.score:.3f}</td>"
             f"<td>{escape(item.reason)}</td>"
+            f'<td><div class="dur-wrap"><div class="dur-bar" style="width: {bar_width}px;"></div>'
+            f'<span class="dur-text">{dur_label}</span></div></td>'
             f"<td>{escape(item.planned_start.isoformat())}</td>"
             f"<td>{escape(item.start_time.isoformat())}</td>"
             f"<td>{escape(item.end_time.isoformat())}</td>"
             "</tr>"
         )
     if not assigned_rows:
-        assigned_rows.append('<tr><td colspan="9">Нет назначений</td></tr>')
+        assigned_rows.append('<tr><td colspan="10">Нет назначений</td></tr>')
 
     unassigned_rows = []
     for item in unassigned:
