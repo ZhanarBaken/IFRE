@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     reason_ai_api_key: str | None = None
     reason_ai_model: str = "qwen3"
     reason_ai_timeout_sec: float = 15.0
+    use_ortools: bool = False
 
     # Env is provided by docker env_file (.envs) or shell; we don't read .env here.
     model_config = SettingsConfigDict(env_prefix="IFRE_", extra="ignore")

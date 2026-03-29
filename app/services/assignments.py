@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Tuple
 
+import logging
+
 from app.core.config import settings
 from app.data.repositories.base import BaseRepository
 from app.models.schemas import AssignmentItem, AssignmentResponse, Task, TaskFilters, UnassignedItem
@@ -10,8 +12,11 @@ from app.services.compatibility import build_compat_index, compatibility_status
 from app.services.duration_forecast import DurationForecaster
 from app.services.fleet_state import FleetStateService
 from app.services.reason_ai import ReasonAIService
+from app.services.route_optimizer import two_opt_order
 from app.services.routing import RoutingService
-from app.services.scoring import score_task
+from app.services.scoring import priority_deadline_hours, score_task
+
+logger = logging.getLogger(__name__)
 
 
 class AssignmentService:
@@ -29,6 +34,7 @@ class AssignmentService:
         max_total_time_minutes: int,
         max_detour_ratio: float,
         grouping: bool | None = None,
+        force_ortools: bool | None = None,
     ) -> AssignmentResponse:
         tasks = self._load_tasks(task_ids, filters)
         if not tasks:
@@ -60,7 +66,7 @@ class AssignmentService:
                 compat_norm,
             )
         else:
-            assignments, extra_unassigned = self._plan_time_aware(
+            assignments, extra_unassigned = self._plan_ortools_or_greedy(
                 tasks,
                 wells_map,
                 unit_state,
@@ -68,6 +74,8 @@ class AssignmentService:
                 has_rules,
                 compat,
                 compat_norm,
+                anchor_time,
+                force_ortools=force_ortools,
             )
         unassigned.extend(extra_unassigned)
         self._rewrite_reasons(assignments, unassigned)
@@ -259,6 +267,64 @@ class AssignmentService:
             groups.append(group)
         return groups
 
+    def _plan_ortools_or_greedy(
+        self,
+        tasks: List[Task],
+        wells_map,
+        unit_state: Dict[int, object],
+        max_total_time_minutes: int,
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+        anchor_time,
+        force_ortools: bool | None = None,
+    ) -> tuple[List[AssignmentItem], List[UnassignedItem]]:
+        task_nodes: Dict[str, int] = {}
+        for task in tasks:
+            well = wells_map[task.destination_uwi]
+            task_nodes[task.task_id] = self.routing.node_index.nearest(well.lon, well.lat)
+
+        # Build route_matrix: unit→task + task→task (needed for OR-Tools multi-stop)
+        route_matrix: Dict[Tuple[int, int], dict | None] = {}
+        for unit in unit_state.values():
+            for task_node in task_nodes.values():
+                key = (unit.node_id, task_node)
+                if key not in route_matrix:
+                    route_matrix[key] = self.routing.route_between_nodes_or_none(
+                        unit.node_id, task_node, speed_kmph=unit.speed_kmph
+                    )
+        use_ortools = settings.use_ortools if force_ortools is None else force_ortools
+        if use_ortools:
+            for src_node in task_nodes.values():
+                for dst_node in task_nodes.values():
+                    if src_node != dst_node:
+                        key = (src_node, dst_node)
+                        if key not in route_matrix:
+                            route_matrix[key] = self.routing.route_between_nodes_or_none(
+                                src_node, dst_node
+                            )
+            from app.services.vrp_solver import ORToolsVRPSolver
+            result = ORToolsVRPSolver().solve(
+                tasks=tasks,
+                wells_map=wells_map,
+                unit_state=unit_state,
+                route_matrix=route_matrix,
+                task_nodes=task_nodes,
+                max_total_time_minutes=max_total_time_minutes,
+                has_rules=has_rules,
+                compat=compat,
+                compat_norm=compat_norm,
+                anchor_time=anchor_time,
+                routing_svc=self.routing,
+            )
+            if result is not None:
+                return result
+
+        return self._plan_time_aware(
+            tasks, wells_map, unit_state, max_total_time_minutes,
+            has_rules, compat, compat_norm, route_matrix=route_matrix,
+        )
+
     def _plan_time_aware(
         self,
         tasks: List[Task],
@@ -268,6 +334,7 @@ class AssignmentService:
         has_rules: bool,
         compat: Dict[str, Set[str]],
         compat_norm: Dict[str, Set[str]],
+        route_matrix: Dict[Tuple[int, int], dict | None] | None = None,
     ) -> tuple[List[AssignmentItem], List[UnassignedItem]]:
         assignments: List[AssignmentItem] = []
         unassigned: List[UnassignedItem] = []
@@ -277,6 +344,17 @@ class AssignmentService:
         for task in tasks:
             well = wells_map[task.destination_uwi]
             task_nodes[task.task_id] = self.routing.node_index.nearest(well.lon, well.lat)
+
+        # Use pre-built matrix if provided (from _plan_ortools_or_greedy), else build now.
+        if route_matrix is None:
+            route_matrix = {}
+            for unit in unit_state.values():
+                for task_node in task_nodes.values():
+                    key = (unit.node_id, task_node)
+                    if key not in route_matrix:
+                        route_matrix[key] = self.routing.route_between_nodes_or_none(
+                            unit.node_id, task_node, speed_kmph=unit.speed_kmph
+                        )
 
         unit_minutes: Dict[int, float] = {uid: 0.0 for uid in unit_state.keys()}
 
@@ -294,9 +372,7 @@ class AssignmentService:
                             if settings.compatibility_strict:
                                 continue
 
-                    route = self.routing.route_between_nodes_or_none(
-                        unit.node_id, task_node, speed_kmph=unit.speed_kmph
-                    )
+                    route = route_matrix.get((unit.node_id, task_node))
                     if route is None:
                         continue
 
@@ -372,7 +448,110 @@ class AssignmentService:
 
             remaining.pop(task.task_id, None)
 
+        # ── 2-opt post-processing: relocate each task to a better unit ──────
+        tasks_by_id: Dict[str, Task] = {t.task_id: t for t in tasks}
+        assignments = self._relocate_improve(
+            assignments, tasks_by_id, unit_state, route_matrix,
+            task_nodes, has_rules, compat, compat_norm,
+        )
+
         return assignments, unassigned
+
+    def _relocate_improve(
+        self,
+        assignments: List[AssignmentItem],
+        tasks_by_id: Dict[str, Task],
+        unit_state: Dict[int, object],
+        route_matrix: Dict[Tuple[int, int], dict | None],
+        task_nodes: Dict[str, int],
+        has_rules: bool,
+        compat: Dict[str, Set[str]],
+        compat_norm: Dict[str, Set[str]],
+    ) -> List[AssignmentItem]:
+        """
+        Greedy post-processing: try re-assigning each task to a better unit.
+
+        For each assignment, checks whether any *other* unit in the fleet
+        produces a higher score (lower cost) for the same task.  Accepts the
+        first improving unit found per task.  Repeats up to 3 passes until
+        no improvement is found.
+
+        This is a single-task relocate operator — it does not re-chain
+        downstream tasks on the same vehicle.
+        """
+        if len(assignments) <= 1:
+            return assignments
+
+        result = list(assignments)
+        improved = True
+        passes = 0
+
+        while improved and passes < 3:
+            improved = False
+            passes += 1
+
+            for idx, asgn in enumerate(result):
+                task = tasks_by_id.get(asgn.task_id)
+                if task is None:
+                    continue
+                task_node = task_nodes.get(asgn.task_id)
+                if task_node is None:
+                    continue
+
+                current_cost = -asgn.score  # higher score ↔ lower cost
+
+                for unit in unit_state.values():
+                    if unit.wialon_id == asgn.wialon_id:
+                        continue
+
+                    if has_rules and settings.compatibility_strict:
+                        status = compatibility_status(
+                            task.task_type, unit.unit_type, compat, compat_norm
+                        )
+                        if status is False or status is None:
+                            continue
+
+                    route = route_matrix.get((unit.node_id, task_node))
+                    if route is None:
+                        continue
+
+                    compat_penalty = 0.0
+                    if has_rules and not settings.compatibility_strict:
+                        status = compatibility_status(
+                            task.task_type, unit.unit_type, compat, compat_norm
+                        )
+                        if status is False:
+                            compat_penalty = settings.compatibility_penalty
+
+                    score_result = score_task(
+                        task=task,
+                        distance_km=route["distance_km"],
+                        travel_minutes=route["time_minutes"],
+                        unit_available_at=unit.available_at,
+                        compatibility_penalty=compat_penalty,
+                    )
+
+                    new_cost = -score_result.score
+                    if new_cost < current_cost - 1e-9:
+                        result[idx] = AssignmentItem(
+                            task_id=task.task_id,
+                            wialon_id=unit.wialon_id,
+                            eta_minutes=score_result.eta_minutes,
+                            distance_km=route["distance_km"],
+                            score=score_result.score,
+                            reason=score_result.reason,
+                            planned_duration_hours=task.duration_hours,
+                            planned_start=task.planned_start,
+                            start_time=score_result.start_time,
+                            end_time=score_result.end_time,
+                            route_nodes=route["nodes"],
+                            route_coords=route["coords"],
+                        )
+                        current_cost = new_cost
+                        improved = True
+
+        logger.info("relocate_improve: %d pass(es), %d assignments", passes, len(result))
+        return result
 
     def _unassigned_reason(
         self,
@@ -483,7 +662,7 @@ class AssignmentService:
         if total_units == 0:
             return "Не назначена: в снапшоте нет доступной техники."
 
-        ordered = self._nearest_neighbor_order(group, wells_map)
+        ordered = self._order_tasks(group, wells_map)
         compatible_units = 0
         path_ok_units = 0
         limit_block_units = 0
@@ -605,7 +784,7 @@ class AssignmentService:
         return False
 
     def _sla_feasible(self, tasks: List[Task], wells_map) -> bool:
-        ordered = self._nearest_neighbor_order(tasks, wells_map)
+        ordered = self._order_tasks(tasks, wells_map)
         current_time = ordered[0].planned_start
         for idx, task in enumerate(ordered):
             if idx == 0:
@@ -621,11 +800,14 @@ class AssignmentService:
                 arrival_time = current_time + timedelta(minutes=travel_minutes)
 
             start_time = max(arrival_time, task.planned_start)
+            deadline = task.planned_start + timedelta(hours=priority_deadline_hours(task.priority))
+            if start_time > deadline:
+                return False
             current_time = start_time + timedelta(hours=task.duration_hours)
         return True
 
     def _group_route_distance(self, group, wells_map):
-        ordered = self._nearest_neighbor_order(group, wells_map)
+        ordered = self._order_tasks(group, wells_map)
         distance = 0.0
         for a, b in zip(ordered, ordered[1:]):
             well_a = wells_map[a.destination_uwi]
@@ -671,6 +853,11 @@ class AssignmentService:
             ordered.append(remaining.pop(best_idx))
         return ordered
 
+    def _order_tasks(self, tasks: List[Task], wells_map: dict) -> List[Task]:
+        """Nearest-neighbor ordering followed by 2-opt local search improvement."""
+        ordered = self._nearest_neighbor_order(tasks, wells_map)
+        return two_opt_order(ordered, wells_map, self.routing)
+
     def _choose_unit_for_group(
         self,
         group,
@@ -682,7 +869,7 @@ class AssignmentService:
         max_total_time_minutes: int,
         unit_minutes: Dict[int, float],
     ) -> Tuple[int | None, List[AssignmentItem] | None, float, str]:
-        ordered = self._nearest_neighbor_order(group, wells_map)
+        ordered = self._order_tasks(group, wells_map)
         best_cost = None
         best_unit_id = None
         best_plan = None

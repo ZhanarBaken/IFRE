@@ -23,6 +23,9 @@ class Well(BaseModel):
     uwi: str
     lon: float
     lat: float
+    well_name: str | None = None
+
+    model_config = ConfigDict(extra="ignore")
 
 
 class WialonUnitSnapshot(BaseModel):
@@ -69,7 +72,7 @@ class RecommendationUnit(BaseModel):
     eta_minutes: int
     distance_km: float
     score: float = Field(description="Итоговый балл кандидата от 0 до 100 (чем выше, тем лучше)")
-    reason: Optional[str] = None
+    reason: str = ""
 
 
 class RecommendationResponse(BaseModel):
@@ -102,8 +105,12 @@ class RouteResponse(BaseModel):
 
 
 class MatrixRequest(BaseModel):
-    start_nodes: List[int]
-    end_nodes: List[int]
+    # Raw graph node IDs (legacy)
+    start_nodes: List[int] | None = None
+    end_nodes: List[int] | None = None
+    # Friendly: resolve wialon_ids → nearest node, uwis → nearest node via wells
+    from_wialon_ids: List[int] | None = None
+    to_uwis: List[str] | None = None
 
 
 class MatrixItem(BaseModel):
@@ -133,6 +140,7 @@ class MultitaskRequest(BaseModel):
     task_ids: List[str] | None = None
     filters: Optional[TaskFilters] = None
     constraints: Optional[MultitaskConstraints] = None
+    planning_mode: Optional[str] = None  # shift_8 | shift_12 | day | unlimited
 
 
 class AssignmentRequest(BaseModel):
@@ -140,6 +148,7 @@ class AssignmentRequest(BaseModel):
     filters: Optional[TaskFilters] = None
     constraints: Optional[MultitaskConstraints] = None
     grouping: bool | None = None
+    planning_mode: Optional[str] = None  # shift_8 | shift_12 | day | unlimited
 
 
 class AssignmentItem(BaseModel):
@@ -168,6 +177,27 @@ class AssignmentResponse(BaseModel):
     summary: str
 
 
+class CompareSummary(BaseModel):
+    algorithm: str
+    assigned: int
+    unassigned: int
+    avg_score: float
+    total_distance_km: float
+    vehicles_used: int
+
+
+class CompareResponse(BaseModel):
+    baseline: CompareSummary
+    optimized: CompareSummary
+    score_improvement_pct: float
+    distance_improvement_pct: float
+    vehicles_saved: int
+    baseline_assignments: List[AssignmentItem]
+    optimized_assignments: List[AssignmentItem]
+    baseline_unassigned: List[UnassignedItem]
+    optimized_unassigned: List[UnassignedItem]
+
+
 class MultitaskResponse(BaseModel):
     groups: List[List[str]]
     strategy_summary: str
@@ -177,3 +207,20 @@ class MultitaskResponse(BaseModel):
     baseline_time_minutes: int
     savings_percent: float
     reason: str
+
+
+class UnitStateResponse(BaseModel):
+    wialon_id: int
+    name: str
+    unit_type: str
+    lon: float
+    lat: float
+    available_at: datetime
+    speed_kmph: float
+
+
+class WellResponse(BaseModel):
+    uwi: str
+    lon: float
+    lat: float
+    well_name: str | None = None

@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from urllib.parse import urlencode
+import json
+
+
+class UTF8JSONResponse(JSONResponse):
+    def render(self, content) -> bytes:
+        return json.dumps(content, ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 from app.core.config import settings
 from app.data.repositories import get_repository
 from app.models.schemas import (
     AssignmentRequest,
     AssignmentResponse,
+    CompareResponse,
+    CompareSummary,
     MultitaskRequest,
     MultitaskResponse,
     MatrixRequest,
@@ -21,8 +30,11 @@ from app.models.schemas import (
     RouteResponse,
     TaskFilters,
     Task,
+    UnitStateResponse,
+    WellResponse,
 )
 from app.services.assignments import AssignmentService
+from app.services.fleet_state import FleetStateService
 from app.services.multitask import MultitaskService
 from app.services.recommendations import RecommendationService
 from app.services.routing import RoutingService
@@ -30,7 +42,28 @@ from app.services.visualization import batch_plan_html, route_map_html
 from app.utils.graph import Graph, NodeIndex, should_make_bidirectional
 
 
-app = FastAPI(title="IFRE Routing Service", version="0.1.0")
+app = FastAPI(title="IFRE Routing Service", version="0.1.0", default_response_class=UTF8JSONResponse)
+
+PLANNING_MODE_MINUTES: dict[str, int] = {
+    "shift_8": 480,
+    "shift_12": 720,
+    "day": 1440,
+    "unlimited": 10_000_000,
+}
+PLANNING_MODE_DEFAULT = "day"
+
+
+def resolve_max_total(
+    planning_mode: str | None,
+    explicit_minutes: int | None,
+) -> int:
+    """Return max_total_time_minutes: explicit value wins over mode; mode wins over default."""
+    if explicit_minutes is not None:
+        return explicit_minutes
+    mode = planning_mode or PLANNING_MODE_DEFAULT
+    if mode not in PLANNING_MODE_MINUTES:
+        raise ValueError(f"Unknown planning_mode '{mode}'. Valid: {list(PLANNING_MODE_MINUTES)}")
+    return PLANNING_MODE_MINUTES[mode]
 
 
 @app.on_event("startup")
@@ -48,6 +81,8 @@ def startup() -> None:
     multitask = MultitaskService(repo, routing)
     assignments = AssignmentService(repo, routing)
 
+    fleet_state = FleetStateService(repo, routing)
+
     app.state.repo = repo
     app.state.graph = graph
     app.state.node_index = node_index
@@ -55,6 +90,7 @@ def startup() -> None:
     app.state.recommendations = recommendations
     app.state.multitask = multitask
     app.state.assignments = assignments
+    app.state.fleet_state = fleet_state
 
 
 @app.post("/api/route", response_model=RouteResponse)
@@ -89,9 +125,33 @@ async def route(req: RouteRequest):
 @app.post("/api/matrix", response_model=MatrixResponse)
 async def matrix(req: MatrixRequest):
     try:
-        matrix = app.state.routing.distance_time_matrix(req.start_nodes, req.end_nodes)
+        start_nodes = list(req.start_nodes or [])
+        end_nodes = list(req.end_nodes or [])
+
+        if req.from_wialon_ids:
+            for wid in req.from_wialon_ids:
+                unit = app.state.repo.unit_by_id(wid)
+                if unit is None:
+                    raise ValueError(f"unit not found: {wid}")
+                node = app.state.node_index.nearest(unit.pos_x, unit.pos_y)
+                if node not in start_nodes:
+                    start_nodes.append(node)
+
+        if req.to_uwis:
+            for uwi in req.to_uwis:
+                well = app.state.repo.well_by_uwi(uwi)
+                if well is None:
+                    raise ValueError(f"well not found: {uwi}")
+                node = app.state.node_index.nearest(well.lon, well.lat)
+                if node not in end_nodes:
+                    end_nodes.append(node)
+
+        if not start_nodes or not end_nodes:
+            raise ValueError("provide start_nodes/end_nodes or from_wialon_ids/to_uwis")
+
+        result = app.state.routing.distance_time_matrix(start_nodes, end_nodes)
         items = []
-        for (start_node, end_node), (distance_km, time_minutes) in matrix.items():
+        for (start_node, end_node), (distance_km, time_minutes) in result.items():
             items.append(
                 {
                     "start_node": start_node,
@@ -106,9 +166,10 @@ async def matrix(req: MatrixRequest):
 
 
 @app.post("/api/recommendations", response_model=RecommendationResponse)
-async def recommendations(req: RecommendationRequest, top_units: int | None = 3):
+async def recommendations(req: RecommendationRequest, top_units: int = 3):
     try:
-        units = app.state.recommendations.recommend(
+        units = await asyncio.to_thread(
+            app.state.recommendations.recommend,
             task_id=req.task_id,
             priority=req.priority,
             destination_uwi=req.destination_uwi,
@@ -117,9 +178,8 @@ async def recommendations(req: RecommendationRequest, top_units: int | None = 3)
             duration_hours=req.duration_hours,
             mode=req.mode,
             exclude_busy=req.exclude_busy,
+            top_n=max(1, top_units),
         )
-        if top_units is not None and top_units > 0:
-            units = units[:top_units]
         return {"units": units}
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -129,17 +189,18 @@ async def recommendations(req: RecommendationRequest, top_units: int | None = 3)
 async def multitask(req: MultitaskRequest):
     try:
         constraints = req.constraints
-        max_total = (
-            constraints.max_total_time_minutes
-            if constraints and constraints.max_total_time_minutes is not None
-            else settings.max_total_time_minutes_default
+        max_total = resolve_max_total(
+            req.planning_mode,
+            constraints.max_total_time_minutes if constraints else None,
         )
         max_detour = (
             constraints.max_detour_ratio
             if constraints and constraints.max_detour_ratio is not None
             else 1.3
         )
-        payload = app.state.multitask.evaluate(req.task_ids, req.filters, max_total, max_detour)
+        payload = await asyncio.to_thread(
+            app.state.multitask.evaluate, req.task_ids, req.filters, max_total, max_detour
+        )
         return payload
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -149,18 +210,84 @@ async def multitask(req: MultitaskRequest):
 async def assignments(req: AssignmentRequest):
     try:
         constraints = req.constraints
-        max_total = (
-            constraints.max_total_time_minutes
-            if constraints and constraints.max_total_time_minutes is not None
-            else settings.max_total_time_minutes_default
+        max_total = resolve_max_total(
+            req.planning_mode,
+            constraints.max_total_time_minutes if constraints else None,
         )
         max_detour = (
             constraints.max_detour_ratio
             if constraints and constraints.max_detour_ratio is not None
             else 1.3
         )
-        payload = app.state.assignments.plan(req.task_ids, req.filters, max_total, max_detour, grouping=req.grouping)
+        payload = await asyncio.to_thread(
+            app.state.assignments.plan,
+            req.task_ids, req.filters, max_total, max_detour, req.grouping,
+        )
         return payload
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/assignments/compare", response_model=CompareResponse)
+async def assignments_compare(req: AssignmentRequest):
+    """Run both greedy (baseline) and OR-Tools (optimized) and return side-by-side comparison."""
+    try:
+        constraints = req.constraints
+        max_total = resolve_max_total(
+            req.planning_mode,
+            constraints.max_total_time_minutes if constraints else None,
+        )
+        max_detour = (
+            constraints.max_detour_ratio
+            if constraints and constraints.max_detour_ratio is not None
+            else 1.3
+        )
+
+        baseline_resp, optimized_resp = await asyncio.gather(
+            asyncio.to_thread(
+                app.state.assignments.plan,
+                req.task_ids, req.filters, max_total, max_detour, False, False,
+            ),
+            asyncio.to_thread(
+                app.state.assignments.plan,
+                req.task_ids, req.filters, max_total, max_detour, False, True,
+            ),
+        )
+
+        def summarize(resp, algorithm: str) -> CompareSummary:
+            scores = [a.score for a in resp.assignments]
+            return CompareSummary(
+                algorithm=algorithm,
+                assigned=len(resp.assignments),
+                unassigned=len(resp.unassigned),
+                avg_score=round(sum(scores) / len(scores), 1) if scores else 0.0,
+                total_distance_km=round(sum(a.distance_km for a in resp.assignments), 2),
+                vehicles_used=len({a.wialon_id for a in resp.assignments}),
+            )
+
+        base = summarize(baseline_resp, "greedy")
+        opt = summarize(optimized_resp, "ortools")
+
+        score_imp = (
+            round((opt.avg_score - base.avg_score) / base.avg_score * 100, 1)
+            if base.avg_score > 0 else 0.0
+        )
+        dist_imp = (
+            round((base.total_distance_km - opt.total_distance_km) / base.total_distance_km * 100, 1)
+            if base.total_distance_km > 0 else 0.0
+        )
+
+        return CompareResponse(
+            baseline=base,
+            optimized=opt,
+            score_improvement_pct=score_imp,
+            distance_improvement_pct=dist_imp,
+            vehicles_saved=base.vehicles_used - opt.vehicles_used,
+            baseline_assignments=baseline_resp.assignments,
+            optimized_assignments=optimized_resp.assignments,
+            baseline_unassigned=baseline_resp.unassigned,
+            optimized_unassigned=optimized_resp.unassigned,
+        )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -222,6 +349,39 @@ async def tasks_debug(limit: int = 50):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/units", response_model=list[UnitStateResponse])
+async def units_list(planning_time: datetime | None = None):
+    try:
+        state = app.state.fleet_state.build_state(anchor_time=planning_time)
+        return [
+            UnitStateResponse(
+                wialon_id=u.wialon_id,
+                name=u.name,
+                unit_type=u.unit_type,
+                lon=u.lon,
+                lat=u.lat,
+                available_at=u.available_at,
+                speed_kmph=u.speed_kmph,
+            )
+            for u in state.values()
+        ]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/wells", response_model=list[WellResponse])
+async def wells_list(uwi: str | None = None):
+    try:
+        if uwi:
+            uwis = [item.strip() for item in uwi.split(",") if item.strip()]
+            wells = app.state.repo.wells_by_uwi(uwis)
+        else:
+            wells = app.state.repo.wells()
+        return [WellResponse(uwi=w.uwi, lon=w.lon, lat=w.lat, well_name=w.well_name) for w in wells]
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/health")
 async def health():
     return {
@@ -252,6 +412,7 @@ async def demo_batch_plan(
     end_date: date | None = None,
     shift: str | None = None,
     limit: int = 20,
+    planning_mode: str | None = None,
     max_total_time_minutes: int | None = None,
     max_detour_ratio: float | None = None,
     grouping: bool | None = None,
@@ -259,41 +420,103 @@ async def demo_batch_plan(
 ):
     try:
         if not embed:
-            params = dict(request.query_params)
-            params["embed"] = "true"
-            query = urlencode(params)
-            src = f"{request.url.path}?{query}" if query else request.url.path
+            sd = start_date.isoformat() if start_date else ""
+            ed = end_date.isoformat() if end_date else ""
+            pm = planning_mode or "day"
+            lim = limit
+            grp = "true" if grouping is not False else "false"
             html = f"""
 <!doctype html>
 <html lang="ru">
   <head>
     <meta charset="utf-8" />
-    <title>IFRE Batch Plan</title>
+    <title>IFRE — Планирование выездов</title>
     <style>
+      *, *::before, *::after {{ box-sizing: border-box; }}
       html, body {{ height: 100%; margin: 0; }}
-      body {{ font-family: "Segoe UI", Arial, sans-serif; background: #f8fafc; }}
+      body {{ font-family: "Segoe UI", Arial, sans-serif; background: #f1f5f9; display: flex; flex-direction: column; }}
+      .panel {{
+        background: #fff; border-bottom: 1px solid #d9e2ec;
+        padding: 14px 20px; display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap;
+      }}
+      .panel h1 {{ margin: 0 16px 0 0; font-size: 18px; color: #1e3a5f; white-space: nowrap; }}
+      .field {{ display: flex; flex-direction: column; gap: 4px; }}
+      .field label {{ font-size: 11px; color: #52606d; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }}
+      .field input, .field select {{
+        border: 1px solid #c8d5e3; border-radius: 6px; padding: 6px 10px;
+        font-size: 13px; color: #1f2933; background: #f8fafc; outline: none;
+      }}
+      .field input:focus, .field select:focus {{ border-color: #2563eb; background: #fff; }}
+      .run-btn {{
+        background: #2563eb; color: #fff; border: none; border-radius: 6px;
+        padding: 8px 22px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
+        align-self: flex-end;
+      }}
+      .run-btn:hover {{ background: #1d4ed8; }}
       #loading {{
-        position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-        background: #f8fafc; color: #1f2933; z-index: 9999; flex-direction: column; gap: 10px;
+        position: fixed; inset: 0; top: 70px; display: none; align-items: center; justify-content: center;
+        background: rgba(241,245,249,.85); color: #1f2933; z-index: 9999; flex-direction: column; gap: 10px;
       }}
       .spinner {{
         width: 42px; height: 42px; border: 4px solid #cbd5e1; border-top-color: #2563eb;
         border-radius: 50%; animation: spin 1s linear infinite;
       }}
       @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
-      iframe {{ width: 100%; height: 100%; border: none; }}
+      iframe {{ flex: 1; border: none; width: 100%; }}
     </style>
   </head>
   <body>
+    <form class="panel" method="get" action="/demo/batch-plan" id="planForm">
+      <h1>IFRE — Планирование выездов</h1>
+      <div class="field">
+        <label>Дата с</label>
+        <input type="date" name="start_date" value="{sd}" required />
+      </div>
+      <div class="field">
+        <label>Дата по</label>
+        <input type="date" name="end_date" value="{ed}" />
+      </div>
+      <div class="field">
+        <label>Кол-во задач</label>
+        <input type="number" name="limit" value="{lim}" min="1" max="200" style="width:80px" />
+      </div>
+      <div class="field">
+        <label>Горизонт</label>
+        <select name="planning_mode">
+          <option value="shift_8" {"selected" if pm=="shift_8" else ""}>Смена 8 ч</option>
+          <option value="shift_12" {"selected" if pm=="shift_12" else ""}>Смена 12 ч</option>
+          <option value="day" {"selected" if pm=="day" else ""}>Сутки</option>
+          <option value="unlimited" {"selected" if pm=="unlimited" else ""}>Без ограничений</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Группировка</label>
+        <select name="grouping">
+          <option value="true" {"selected" if grp=="true" else ""}>Да (multi-stop)</option>
+          <option value="false" {"selected" if grp=="false" else ""}>Нет (1 задача = 1 машина)</option>
+        </select>
+      </div>
+      <button class="run-btn" type="submit">Рассчитать</button>
+    </form>
     <div id="loading">
       <div class="spinner"></div>
-      <div>Идет расчет маршрутов, подождите...</div>
+      <div>Идёт расчёт маршрутов, подождите...</div>
     </div>
-    <iframe id="frame" src="{src}"></iframe>
+    <iframe id="frame" src="" style="display:none"></iframe>
     <script>
+      const form = document.getElementById('planForm');
       const frame = document.getElementById('frame');
       const loading = document.getElementById('loading');
-      frame.addEventListener('load', () => {{ loading.style.display = 'none'; }});
+      form.addEventListener('submit', function(e) {{
+        e.preventDefault();
+        const data = new FormData(form);
+        const params = new URLSearchParams(data);
+        params.set('embed', 'true');
+        frame.src = '/demo/batch-plan?' + params.toString();
+        frame.style.display = 'block';
+        loading.style.display = 'flex';
+        frame.onload = () => {{ loading.style.display = 'none'; }};
+      }});
     </script>
   </body>
 </html>
@@ -312,9 +535,7 @@ async def demo_batch_plan(
         if grouping is None:
             grouping = True
 
-        effective_max_total = (
-            max_total_time_minutes if max_total_time_minutes is not None else settings.max_total_time_minutes_default
-        )
+        effective_max_total = resolve_max_total(planning_mode, max_total_time_minutes)
         effective_max_detour = max_detour_ratio if max_detour_ratio is not None else 1.3
 
         payload = app.state.assignments.plan(

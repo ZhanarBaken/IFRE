@@ -4,3 +4,5 @@ pydantic-settings
 sqlalchemy
 psycopg[binary]
 folium
+ortools>=9.8
+pytest
