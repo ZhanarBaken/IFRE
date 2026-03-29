@@ -40,10 +40,10 @@ class PostgresRepository(BaseRepository):
         return self._get_cached("road_edges", self._load_road_edges)
 
     def wells(self) -> List[Well]:
-        return self._load_wells()
+        return self._get_cached("wells", self._load_wells)
 
     def units_snapshot(self) -> List[WialonUnitSnapshot]:
-        return self._load_units_snapshot()
+        return self._get_cached("units_snapshot", self._load_units_snapshot)
 
     def tasks(self) -> List[Task]:
         table = self._tasks_table()
@@ -55,7 +55,7 @@ class PostgresRepository(BaseRepository):
         return self._get_cached("compatibility", self._load_compatibility)
 
     def units_snapshots_history(self) -> List[WialonUnitSnapshot]:
-        return self._load_units_snapshot_history()
+        return self._get_cached("units_snapshots_history", self._load_units_snapshot_history)
 
     def tasks_by_ids(self, task_ids: List[str]) -> List[Task]:
         if not task_ids:
@@ -142,6 +142,14 @@ class PostgresRepository(BaseRepository):
             if name in row and row[name] is not None:
                 return row[name]
         return default
+
+    @staticmethod
+    def _fix_encoding(s: str) -> str:
+        """Fix text stored as Win-1251 but read as latin-1 (common PG misconfiguration)."""
+        try:
+            return s.encode("latin-1").decode("utf-8")
+        except (UnicodeDecodeError, UnicodeEncodeError):
+            return s
 
     def _require_columns(self, table: Table, required: Dict[str, Iterable[str]]) -> None:
         cols = set(table.columns.keys())
@@ -537,7 +545,7 @@ class PostgresRepository(BaseRepository):
                     destination_uwi=str(destination_uwi),
                     planned_start=planned_start,
                     duration_hours=duration_hours,
-                    task_type=str(task_type),
+                    task_type=self._fix_encoding(str(task_type)),
                     start_day=start_day,
                     shift=shift,
                 )
@@ -1013,14 +1021,14 @@ class PostgresRepository(BaseRepository):
             if code.endswith("1C"):
                 desc = self._extract_from_value_json(item.get("value_json"), ["Description", "Name"])
                 if desc:
-                    return desc
+                    return self._fix_encoding(desc)
             if item.get("value_text"):
-                return str(item.get("value_text"))
+                return self._fix_encoding(str(item.get("value_text")))
             if item.get("value_str"):
-                return str(item.get("value_str"))
+                return self._fix_encoding(str(item.get("value_str")))
             ref_id = item.get("value_reference")
             if ref_id is not None:
-                return elements_map.get(int(ref_id), "unknown")
+                return self._fix_encoding(elements_map.get(int(ref_id), "unknown"))
         return "unknown"
 
     def _resolve_vehkind(self, values: Dict[str, dict], field_codes: Dict[str, List[str]], elements_map: Dict[int, str]) -> str:
