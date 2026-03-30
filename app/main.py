@@ -425,6 +425,7 @@ async def demo_batch_plan(
             pm = planning_mode or "day"
             lim = limit
             grp = "true" if grouping is not False else "false"
+            tid = task_ids or ""
             html = f"""
 <!doctype html>
 <html lang="ru">
@@ -437,24 +438,37 @@ async def demo_batch_plan(
       body {{ font-family: "Segoe UI", Arial, sans-serif; background: #f1f5f9; display: flex; flex-direction: column; }}
       .panel {{
         background: #fff; border-bottom: 1px solid #d9e2ec;
-        padding: 14px 20px; display: flex; align-items: flex-end; gap: 14px; flex-wrap: wrap;
+        padding: 16px 24px; display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
       }}
-      .panel h1 {{ margin: 0 16px 0 0; font-size: 18px; color: #1e3a5f; white-space: nowrap; }}
-      .field {{ display: flex; flex-direction: column; gap: 4px; }}
-      .field label {{ font-size: 11px; color: #52606d; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }}
+      .brand {{
+        font-size: 15px; font-weight: 700; color: #1e3a5f; white-space: nowrap;
+        background: #e8f0fe; border-radius: 6px; padding: 6px 12px;
+        border: 1px solid #c7d7f9; letter-spacing: .3px; height: 34px;
+        display: flex; align-items: center;
+      }}
+      .sep-v {{
+        width: 1px; height: 28px; background: #d9e2ec; flex-shrink: 0;
+      }}
+      .field {{ display: flex; flex-direction: column; gap: 3px; }}
+      .field label {{ font-size: 10px; color: #52606d; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }}
       .field input, .field select {{
-        border: 1px solid #c8d5e3; border-radius: 6px; padding: 6px 10px;
+        height: 34px; border: 1px solid #c8d5e3; border-radius: 6px; padding: 0 10px;
         font-size: 13px; color: #1f2933; background: #f8fafc; outline: none;
       }}
       .field input:focus, .field select:focus {{ border-color: #2563eb; background: #fff; }}
+      .or-badge {{
+        font-size: 11px; font-weight: 700; color: #94a3b8; background: #f1f5f9;
+        border: 1px solid #d9e2ec; border-radius: 20px; padding: 2px 8px;
+        white-space: nowrap; align-self: center; margin-top: 16px;
+      }}
       .run-btn {{
         background: #2563eb; color: #fff; border: none; border-radius: 6px;
-        padding: 8px 22px; font-size: 14px; font-weight: 600; cursor: pointer; white-space: nowrap;
-        align-self: flex-end;
+        height: 34px; padding: 0 22px; font-size: 14px; font-weight: 600;
+        cursor: pointer; white-space: nowrap; margin-top: 16px;
       }}
       .run-btn:hover {{ background: #1d4ed8; }}
       #loading {{
-        position: fixed; inset: 0; top: 70px; display: none; align-items: center; justify-content: center;
+        position: fixed; inset: 0; top: 60px; display: none; align-items: center; justify-content: center;
         background: rgba(241,245,249,.85); color: #1f2933; z-index: 9999; flex-direction: column; gap: 10px;
       }}
       .spinner {{
@@ -467,22 +481,32 @@ async def demo_batch_plan(
   </head>
   <body>
     <form class="panel" method="get" action="/demo/batch-plan" id="planForm">
-      <h1>IFRE — Планирование выездов</h1>
+      <span class="brand">IFRE</span>
+      <div class="sep-v"></div>
       <div class="field">
-        <label>Дата с</label>
-        <input type="date" name="start_date" value="{sd}" required />
+        <label>№ заявок</label>
+        <input type="text" name="task_ids" value="{tid}" placeholder="10038, 10042, 12635"
+               oninput="toggleDates(this.value)" style="width:200px" />
       </div>
-      <div class="field">
-        <label>Дата по</label>
-        <input type="date" name="end_date" value="{ed}" />
+      <span class="or-badge" id="orBadge">или</span>
+      <div id="dateFields" style="display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;">
+        <div class="field">
+          <label>Дата с</label>
+          <input type="date" name="start_date" value="{sd}" id="startDate" style="width:140px" />
+        </div>
+        <div class="field">
+          <label>Дата по</label>
+          <input type="date" name="end_date" value="{ed}" style="width:140px" />
+        </div>
+        <div class="field">
+          <label>Лимит заявок</label>
+          <input type="number" name="limit" value="{lim}" min="1" max="200" style="width:80px" />
+        </div>
       </div>
-      <div class="field">
-        <label>Кол-во задач</label>
-        <input type="number" name="limit" value="{lim}" min="1" max="200" style="width:80px" />
-      </div>
+      <div class="sep-v"></div>
       <div class="field">
         <label>Горизонт</label>
-        <select name="planning_mode">
+        <select name="planning_mode" style="width:130px">
           <option value="shift_8" {"selected" if pm=="shift_8" else ""}>Смена 8 ч</option>
           <option value="shift_12" {"selected" if pm=="shift_12" else ""}>Смена 12 ч</option>
           <option value="day" {"selected" if pm=="day" else ""}>Сутки</option>
@@ -491,9 +515,9 @@ async def demo_batch_plan(
       </div>
       <div class="field">
         <label>Группировка</label>
-        <select name="grouping">
+        <select name="grouping" style="width:160px">
           <option value="true" {"selected" if grp=="true" else ""}>Да (multi-stop)</option>
-          <option value="false" {"selected" if grp=="false" else ""}>Нет (1 задача = 1 машина)</option>
+          <option value="false" {"selected" if grp=="false" else ""}>Нет (1 заявка = 1 машина)</option>
         </select>
       </div>
       <button class="run-btn" type="submit">Рассчитать</button>
@@ -504,6 +528,14 @@ async def demo_batch_plan(
     </div>
     <iframe id="frame" src="" style="display:none"></iframe>
     <script>
+      function toggleDates(val) {{
+        const show = val.trim() === '';
+        document.getElementById('dateFields').style.display = show ? 'flex' : 'none';
+        document.getElementById('orBadge').style.display = show ? '' : 'none';
+        document.getElementById('startDate').required = show;
+      }}
+      toggleDates(document.querySelector('[name=task_ids]').value);
+
       const form = document.getElementById('planForm');
       const frame = document.getElementById('frame');
       const loading = document.getElementById('loading');
