@@ -55,6 +55,7 @@ def batch_plan_html(
     summary: str | None = None,
     multitask_reason: str | None = None,
     grouped_task_map: Dict[str, int] | None = None,
+    raw_groups: List[List[str]] | None = None,
 ) -> str:
     coords = [coord for item in assignments for coord in item.route_coords if len(coord) >= 2]
     if coords:
@@ -135,10 +136,16 @@ def batch_plan_html(
                 tooltip=f"{item.task_id} (точка {idx})",
             ).add_to(fmap)
 
+    color_by_task: Dict[str, str] = {}
+    for unit_id, items in grouped.items():
+        c = color_by_unit.get(unit_id, "#1f77b4")
+        for item in items:
+            color_by_task[item.task_id] = c
+
     polyline_js = _build_polyline_js(polyline_vars, polyline_colors, fmap.get_name())
     if polyline_js:
         fmap.get_root().script.add_child(Element(polyline_js))
-    table_html = _batch_table_html(assignments, unassigned, summary, multitask_reason, grouped_task_map or {})
+    table_html = _batch_table_html(assignments, unassigned, summary, multitask_reason, color_by_task, raw_groups or [])
     fmap.get_root().html.add_child(Element(table_html))
 
     return fmap.get_root().render()
@@ -226,28 +233,26 @@ def _batch_table_html(
     unassigned: Sequence[UnassignedItem],
     summary: str | None,
     multitask_reason: str | None,
-    grouped_task_map: Dict[str, int],
+    color_by_task: Dict[str, str],
+    raw_groups: List[List[str]],
 ) -> str:
-    group_palette = [
-        "#e8f4ff",
-        "#ecfdf3",
-        "#fff7e6",
-        "#f5efff",
-        "#ffeef3",
-        "#eef2ff",
-    ]
+    def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+        h = hex_color.lstrip("#")
+        r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        return f"rgba({r},{g},{b},{alpha})"
+
     assigned_rows = []
     for item in assignments:
         duration_hours = max(0.0, item.planned_duration_hours)
         dur_label = f"{duration_hours:.1f} ч"
         bar_width = max(20, min(120, int(round(duration_hours * 10))))
-        group_idx = grouped_task_map.get(item.task_id)
         row_class = "assign-row"
         row_style = ""
-        if group_idx is not None:
+        color = color_by_task.get(item.task_id)
+        if color:
+            bg = _hex_to_rgba(color, 0.13)
             row_class = "assign-row grouped"
-            color = group_palette[group_idx % len(group_palette)]
-            row_style = f' style="--group-bg:{color};"'
+            row_style = f' style="--group-bg:{bg};"'
         assigned_rows.append(
             f'<tr class="{row_class}" data-task="{escape(item.task_id)}"{row_style}>'
             f"<td>{escape(item.task_id)}</td>"
@@ -277,12 +282,27 @@ def _batch_table_html(
     if not unassigned_rows:
         unassigned_rows.append('<tr><td colspan="2">Нет неназначенных задач</td></tr>')
 
+    # Build structured groups display
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+    groups_html_parts = []
+    for idx, group in enumerate(raw_groups):
+        if not group:
+            continue
+        color = palette[idx % len(palette)]
+        dot = f'<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:{color};margin-right:4px;"></span>'
+        label = "Группа" if len(group) > 1 else "Отдельно"
+        ids = ", ".join(str(tid) for tid in group)
+        groups_html_parts.append(f'{dot}<b>{label} {idx + 1}:</b> {escape(ids)}')
+    groups_html = "&nbsp;&nbsp;|&nbsp;&nbsp;".join(groups_html_parts)
+
+    reason_div = f'<div style="margin-top:6px;font-size:12px;color:#52606d;">{escape(multitask_reason)}</div>' if multitask_reason else ""
+    groups_div = f'<div>{groups_html}{reason_div}</div>' if (groups_html or reason_div) else ""
+
     summary_text = escape(summary) if summary else "н/д"
-    multitask_reason_text = escape(multitask_reason) if multitask_reason else ""
     template = Template(_load_template("batch_plan.html"))
     return template.safe_substitute(
         summary_text=summary_text,
-        multitask_reason=multitask_reason_text,
+        groups_html=groups_div,
         assigned_count=str(len(assignments)),
         unassigned_count=str(len(unassigned)),
         assigned_rows="".join(assigned_rows),

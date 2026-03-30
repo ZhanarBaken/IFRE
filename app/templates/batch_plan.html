@@ -2,7 +2,6 @@
   body { margin: 0; font-family: "Segoe UI", Arial, sans-serif; color: #1f2933; }
   .batch-wrap { padding: 16px 20px 28px; }
   .batch-summary { margin: 0 0 12px; font-size: 14px; color: #52606d; }
-  .batch-reason { margin: 0 0 14px; font-size: 13px; color: #1f2933; background: #f8fafc; border: 1px solid #d9e2ec; padding: 10px 12px; border-radius: 6px; }
   table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; font-size: 13px; }
   th, td { border: 1px solid #d9e2ec; padding: 6px 8px; text-align: left; }
   th { background: #f5f7fa; }
@@ -20,9 +19,7 @@
   <div class="batch-summary">
     Назначено: $assigned_count. Без назначения: $unassigned_count.
   </div>
-  <div class="batch-reason">
-    Причина группировки: $multitask_reason
-  </div>
+  $groups_html
   <h2>Назначенные задачи</h2>
   <table>
     <thead>

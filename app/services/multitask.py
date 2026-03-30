@@ -359,25 +359,65 @@ class MultitaskService:
                 f"Экономия {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
             )
 
+        limit_pct = int(round((max_detour_ratio - 1.0) * 100))
+
         if strategy == "mixed":
-            merged_text = "; ".join(merged_labels) if merged_labels else "часть заявок"
-            first = merged_groups[0] if merged_groups else None
-            first_diameter = self._group_diameter_km(first, wells_map) if first else 0.0
+            group_lines = []
+            for grp in merged_groups:
+                ids = ",".join(t.task_id for t in grp)
+                diameter = self._group_diameter_km(grp, wells_map)
+                group_lines.append(f"заявки {ids} — скважины в радиусе {diameter:.1f} км")
+            separate_tasks = [t for t in tasks if not any(t in grp for grp in merged_groups)]
+            separate_ids = ",".join(t.task_id for t in separate_tasks)
+            groups_text = "; ".join(group_lines)
+            if separate_ids:
+                min_detour_pct = self._min_detour_pct_among(separate_tasks, wells_map)
+                if min_detour_pct is not None and min_detour_pct > limit_pct:
+                    separate_text = (
+                        f"заявки {separate_ids} выполняются раздельно — "
+                        f"наименьший крюк между ними составил бы {min_detour_pct:.0f}% при лимите {limit_pct}%."
+                    )
+                else:
+                    separate_text = (
+                        f"заявки {separate_ids} выполняются раздельно — "
+                        f"суммарное время выезда превысило бы лимит {max_total_time_minutes} мин."
+                    )
+            else:
+                separate_text = ""
             return (
-                f"предложена группировка заявок {merged_text} (скважины рядом: около {first_diameter:.1f} км). "
-                f"Остальные не объединены — крюк превысил бы ограничения "
-                f"(max_detour_ratio={max_detour_ratio}, max_total_time_minutes={max_total_time_minutes}). "
+                f"предложена группировка: {groups_text}. "
+                f"{separate_text} "
                 f"Потенциальная экономия при успешном назначении: {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
-            )
+            ).strip()
 
         # separate
-        min_pair_text = f"{min_pair_km:.1f} км" if min_pair_km is not None else "н/д"
+        min_detour_pct = self._min_detour_pct_among(tasks, wells_map)
+        if min_detour_pct is not None and min_detour_pct > limit_pct:
+            detour_text = f"наименьший крюк между парами составил бы {min_detour_pct:.0f}% при лимите {limit_pct}%"
+        else:
+            detour_text = f"суммарное время выезда превысило бы лимит {max_total_time_minutes} мин"
         return (
-            f"задачи оставлены раздельно: минимальное расстояние между парами {min_pair_text}, "
-            f"а объединение не проходит по ограничениям "
-            f"max_detour_ratio={max_detour_ratio} и max_total_time_minutes={max_total_time_minutes}. "
+            f"задачи оставлены раздельно: {detour_text}. "
             f"Экономия относительно baseline отсутствует ({savings_percent:.1f}%)."
         )
+
+    def _min_detour_pct_among(self, tasks, wells_map) -> float | None:
+        if len(tasks) < 2:
+            return None
+        min_detour = None
+        for i in range(len(tasks)):
+            for j in range(i + 1, len(tasks)):
+                pair = [tasks[i], tasks[j]]
+                dist = self._group_route_distance(pair, wells_map)
+                if dist is None:
+                    continue
+                base, _ = self._group_baseline(pair, wells_map)
+                if base <= 0:
+                    continue
+                detour_pct = (dist / base - 1.0) * 100.0
+                if min_detour is None or detour_pct < min_detour:
+                    min_detour = detour_pct
+        return min_detour
 
     def _min_pair_distance_km(self, tasks, wells_map) -> float | None:
         if len(tasks) < 2:

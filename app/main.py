@@ -49,6 +49,7 @@ PLANNING_MODE_MINUTES: dict[str, int] = {
     "shift_12": 720,
     "day": 1440,
     "unlimited": 10_000_000,
+    "custom": 480,  # fallback if field is empty
 }
 PLANNING_MODE_DEFAULT = "day"
 
@@ -415,6 +416,7 @@ async def demo_batch_plan(
     planning_mode: str | None = None,
     max_total_time_minutes: int | None = None,
     max_detour_ratio: float | None = None,
+    max_detour_pct: int | None = None,
     grouping: bool | None = None,
     embed: bool = False,
 ):
@@ -426,6 +428,10 @@ async def demo_batch_plan(
             lim = limit
             grp = "true" if grouping is not False else "false"
             tid = task_ids or ""
+            if max_detour_pct is not None:
+                dr = 1.0 + max_detour_pct / 100.0
+            else:
+                dr = max_detour_ratio if max_detour_ratio is not None else 1.3
             html = f"""
 <!doctype html>
 <html lang="ru">
@@ -506,12 +512,18 @@ async def demo_batch_plan(
       <div class="sep-v"></div>
       <div class="field">
         <label>Горизонт</label>
-        <select name="planning_mode" style="width:130px">
-          <option value="shift_8" {"selected" if pm=="shift_8" else ""}>Смена 8 ч</option>
-          <option value="shift_12" {"selected" if pm=="shift_12" else ""}>Смена 12 ч</option>
-          <option value="day" {"selected" if pm=="day" else ""}>Сутки</option>
-          <option value="unlimited" {"selected" if pm=="unlimited" else ""}>Без ограничений</option>
-        </select>
+        <div style="display:flex;gap:4px;align-items:center">
+          <select name="planning_mode" style="width:120px" onchange="toggleCustomHorizon(this.value)">
+            <option value="shift_8" {"selected" if pm=="shift_8" else ""}>Смена 8 ч</option>
+            <option value="shift_12" {"selected" if pm=="shift_12" else ""}>Смена 12 ч</option>
+            <option value="day" {"selected" if pm=="day" else ""}>Сутки</option>
+            <option value="unlimited" {"selected" if pm=="unlimited" else ""}>Без ограничений</option>
+            <option value="custom" {"selected" if pm=="custom" else ""}>Своё...</option>
+          </select>
+          <input type="number" name="max_total_time_minutes" id="customHorizon" placeholder="мин"
+            style="width:90px;height:34px;display:{"flex" if pm=="custom" else "none"};box-sizing:border-box;border:1px solid #cbd5e1;border-radius:6px;padding:0 8px;font-size:13px;color:#1f2933;background:#f8fafc;outline:none"
+            min="1" value="">
+        </div>
       </div>
       <div class="field">
         <label>Группировка</label>
@@ -519,6 +531,12 @@ async def demo_batch_plan(
           <option value="true" {"selected" if grp=="true" else ""}>Да (multi-stop)</option>
           <option value="false" {"selected" if grp=="false" else ""}>Нет (1 заявка = 1 машина)</option>
         </select>
+      </div>
+      <div class="sep-v"></div>
+      <div class="field">
+        <label>Крюк, %</label>
+        <input type="number" name="max_detour_pct" style="width:70px" min="0" max="200" step="5"
+          value="{int(round((dr - 1.0) * 100))}">
       </div>
       <button class="run-btn" type="submit">Рассчитать</button>
     </form>
@@ -528,6 +546,13 @@ async def demo_batch_plan(
     </div>
     <iframe id="frame" src="" style="display:none"></iframe>
     <script>
+      function toggleCustomHorizon(val) {{
+        const el = document.getElementById('customHorizon');
+        el.style.display = val === 'custom' ? 'block' : 'none';
+        el.required = val === 'custom';
+      }}
+      toggleCustomHorizon(document.querySelector('[name=planning_mode]').value);
+
       function toggleDates(val) {{
         const show = val.trim() === '';
         document.getElementById('dateFields').style.display = show ? 'flex' : 'none';
@@ -542,7 +567,10 @@ async def demo_batch_plan(
       form.addEventListener('submit', function(e) {{
         e.preventDefault();
         const data = new FormData(form);
-        const params = new URLSearchParams(data);
+        const params = new URLSearchParams();
+        for (const [k, v] of data.entries()) {{
+          if (v !== '') params.append(k, v);
+        }}
         params.set('embed', 'true');
         frame.src = '/demo/batch-plan?' + params.toString();
         frame.style.display = 'block';
@@ -568,7 +596,10 @@ async def demo_batch_plan(
             grouping = True
 
         effective_max_total = resolve_max_total(planning_mode, max_total_time_minutes)
-        effective_max_detour = max_detour_ratio if max_detour_ratio is not None else 1.3
+        if max_detour_pct is not None:
+            effective_max_detour = 1.0 + max_detour_pct / 100.0
+        else:
+            effective_max_detour = max_detour_ratio if max_detour_ratio is not None else 1.3
 
         payload = app.state.assignments.plan(
             parsed_ids,
@@ -578,7 +609,6 @@ async def demo_batch_plan(
             grouping=grouping,
         )
         multitask_reason = None
-        grouped_task_map: dict[str, int] = {}
         if grouping:
             try:
                 mt = app.state.multitask.evaluate(
@@ -588,20 +618,21 @@ async def demo_batch_plan(
                     max_detour_ratio=effective_max_detour,
                 )
                 multitask_reason = mt.get("reason")
-                raw_groups = mt.get("groups") or []
-                for idx, group in enumerate(raw_groups):
-                    if isinstance(group, list) and len(group) > 1:
-                        for task_id in group:
-                            grouped_task_map[str(task_id)] = idx
             except Exception as exc:
                 multitask_reason = f"не удалось получить причину группировки: {exc}"
+
+        # Build display groups from actual assignments (by vehicle)
+        vehicle_tasks: dict[int, list[str]] = {}
+        for item in payload.assignments:
+            vehicle_tasks.setdefault(item.wialon_id, []).append(item.task_id)
+        raw_groups = list(vehicle_tasks.values())
 
         return batch_plan_html(
             payload.assignments,
             payload.unassigned,
             summary=payload.summary,
             multitask_reason=multitask_reason,
-            grouped_task_map=grouped_task_map,
+            raw_groups=raw_groups,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

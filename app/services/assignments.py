@@ -242,7 +242,8 @@ class AssignmentService:
         compat: Dict[str, Set[str]],
         compat_norm: Dict[str, Set[str]],
     ):
-        remaining = sorted(tasks, key=lambda t: (t.planned_start, t.priority))
+        _priority_order = {"high": 0, "medium": 1, "low": 2}
+        remaining = sorted(tasks, key=lambda t: (_priority_order.get(t.priority, 1), t.planned_start))
         groups = []
         while remaining:
             base = remaining.pop(0)
