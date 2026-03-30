@@ -249,7 +249,7 @@ curl -X POST http://127.0.0.1:8000/api/multitask \
 
 #### `POST /api/assignments`
 
-Пакетное назначение: распределяет все заявки смены по флоту с учётом доступности, SLA и (опционально) multi‑stop группировки.
+Пакетное назначение: распределяет все заявки смены по флоту с учётом доступности, SLA и (опционально) multi‑stop группировки. Заявки обрабатываются в порядке приоритета: сначала `high`, затем `medium`, затем `low`; внутри одного приоритета — по `planned_start`.
 
 При `grouping=false` и `IFRE_USE_ORTOOLS=true` используется VRPTW‑решатель OR‑Tools: он строит глобально‑оптимальные мультизаходные маршруты (несколько задач на одну машину в правильном порядке) вместо жадного поочерёдного назначения.
 
@@ -310,9 +310,11 @@ curl -s http://localhost:8002/api/assignments/compare -X POST \
 | `shift_12` | 720 | Одна смена 12 ч |
 | `day` | 1440 | Одни сутки (**по умолчанию**) |
 | `unlimited` | 10 000 000 | Без ограничения по времени выезда |
+| `custom` | — | Произвольный горизонт; требует параметр `max_total_time_minutes` (мин) |
 
 Правила приоритета:
-- Если передан `planning_mode` — используется соответствующий лимит.
+- Если передан `planning_mode=custom` — используется значение `max_total_time_minutes`.
+- Если передан `planning_mode` (не `custom`) — используется соответствующий лимит из таблицы.
 - Если передан `constraints.max_total_time_minutes` — он **перебивает** режим.
 - Если не передано ничего — применяется `day` (1440 мин).
 
@@ -395,12 +397,31 @@ http://127.0.0.1:8000/demo/route-map?wialon_id=29935360&uwi=JET_4055
 # с группировкой multi-stop
 http://127.0.0.1:8000/demo/batch-plan?task_ids=12649,12653,12686&grouping=true&max_total_time_minutes=20000&max_detour_ratio=1.3
 
+# с ограничением крюка 30% (по умолчанию)
+http://127.0.0.1:8000/demo/batch-plan?task_ids=12649,12653,12686&grouping=true&max_detour_pct=30
+
 # без группировки (baseline)
 http://127.0.0.1:8000/demo/batch-plan?task_ids=12649,12653,12686&grouping=false
 
 # по дате и смене
 http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-31&shift=night&limit=20
+
+# произвольный горизонт 600 мин
+http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-31&shift=night&limit=20&planning_mode=custom&max_total_time_minutes=600
 ```
+
+Параметры демо-формы batch-plan:
+
+| Параметр | Тип | По умолчанию | Описание |
+|---|---|---|---|
+| `task_ids` | string | — | ID заявок через запятую |
+| `start_date` | date | — | Дата для фильтрации заявок |
+| `shift` | string | — | Смена: `day` / `night` |
+| `limit` | int | — | Максимальное число заявок (отбираются по приоритету: high→medium→low) |
+| `grouping` | bool | `true` | Включить multi-stop группировку |
+| `planning_mode` | string | `day` | Горизонт планирования (см. таблицу режимов) |
+| `max_total_time_minutes` | int | — | Используется при `planning_mode=custom` |
+| `max_detour_pct` | int | `30` | Максимальный допустимый крюк при группировке, % |
 
 ---
 
