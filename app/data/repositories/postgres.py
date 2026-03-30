@@ -300,7 +300,8 @@ class PostgresRepository(BaseRepository):
         rows = self._fetch_all(table)
         if not rows:
             raise RuntimeError("wells: table is empty")
-        return self._parse_wells(rows)
+        wells = self._parse_wells(rows)
+        return wells
 
     def _wells_table(self) -> Table:
         table = self._table("wells")
@@ -739,6 +740,7 @@ class PostgresRepository(BaseRepository):
         return [task for task in tasks if task.task_id in expanded]
 
     def _tasks_by_window_eav(self, start_dt, end_dt, limit: int | None = None) -> List[Task]:
+        _priority_order = {"high": 0, "medium": 1, "low": 2}
         start_norm = self._normalize_dt(start_dt)
         end_norm = self._normalize_dt(end_dt)
         tasks = [
@@ -746,6 +748,7 @@ class PostgresRepository(BaseRepository):
             for t in self.tasks()
             if start_norm <= self._normalize_dt(t.planned_start) < end_norm
         ]
+        tasks.sort(key=lambda t: (_priority_order.get(t.priority, 1), t.planned_start))
         if limit is not None:
             return tasks[:limit]
         return tasks

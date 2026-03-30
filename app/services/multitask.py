@@ -364,10 +364,10 @@ class MultitaskService:
             first = merged_groups[0] if merged_groups else None
             first_diameter = self._group_diameter_km(first, wells_map) if first else 0.0
             return (
-                f"объединены заявки {merged_text} (внутри группы точки рядом: около {first_diameter:.1f} км). "
-                f"Остальные оставлены отдельно, потому что объединение превышает ограничения "
-                f"max_detour_ratio={max_detour_ratio} или max_total_time_minutes={max_total_time_minutes}. "
-                f"Итоговая экономия {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
+                f"предложена группировка заявок {merged_text} (скважины рядом: около {first_diameter:.1f} км). "
+                f"Остальные не объединены — крюк превысил бы ограничения "
+                f"(max_detour_ratio={max_detour_ratio}, max_total_time_minutes={max_total_time_minutes}). "
+                f"Потенциальная экономия при успешном назначении: {saved_km:.1f} км и {saved_min:.0f} мин ({savings_percent:.1f}% к baseline)."
             )
 
         # separate

@@ -696,7 +696,7 @@ class AssignmentService:
                 continue
 
             path_ok_units += 1
-            if max_total_time_minutes and used_minutes > 0 and projected > max_total_time_minutes:
+            if max_total_time_minutes and projected > max_total_time_minutes:
                 limit_block_units += 1
                 if min_projected is None or projected < min_projected:
                     min_projected = projected
