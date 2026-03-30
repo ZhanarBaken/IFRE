@@ -71,6 +71,8 @@ make down   # остановить
 
 Swagger UI: `http://127.0.0.1:8000/docs`
 
+![Swagger UI](docs/screenshots/swagger.png)
+
 ---
 
 ## Тесты
