@@ -26,3 +26,6 @@ dist/
 # Local config
 .env
 .envs/*
+
+# TOR / internal docs
+TOR.md

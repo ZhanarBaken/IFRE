@@ -32,6 +32,7 @@ class RecommendationService:
         duration_hours,
         mode: str | None = None,
         exclude_busy: bool = False,
+        top_n: int = 3,
     ):
         mode_norm = (mode or "optimized").lower()
         task_type = task_type or self._infer_task_type(task_id)
@@ -47,7 +48,7 @@ class RecommendationService:
             compat, compat_norm = build_compat_index(rules)
 
         if mode_norm == "baseline":
-            return self._recommend_baseline(units_state, well, task_type, planned_start, has_rules, compat, compat_norm)
+            return self._recommend_baseline(units_state, well, task_type, planned_start, has_rules, compat, compat_norm, top_n=top_n)
 
         candidates: list[dict] = []
         task_for_score = self._task_for_scoring(
@@ -62,15 +63,17 @@ class RecommendationService:
                     if settings.compatibility_strict:
                         continue
 
-            route = self.routing.route_between_points_or_none(unit.lon, unit.lat, well.lon, well.lat)
+            route = self.routing.route_between_points_or_none(
+                unit.lon, unit.lat, well.lon, well.lat, speed_kmph=unit.speed_kmph
+            )
             if route is None:
                 continue
             distance_km = route["distance_km"]
-            travel_minutes = int(round(distance_km / unit.speed_kmph * 60.0))
+            travel_minutes = route["time_minutes"]
             if exclude_busy and planned_start is not None and unit.available_at > planned_start:
                 continue
             compat_penalty = 0.0
-            if has_rules and status is False and not settings.compatibility_strict:
+            if has_rules and (status is False or status is None) and not settings.compatibility_strict:
                 compat_penalty = settings.compatibility_penalty
             score_result = score_task(
                 task=task_for_score,
@@ -97,7 +100,7 @@ class RecommendationService:
             )
 
         candidates.sort(key=lambda x: x["score"], reverse=True)
-        top_raw = candidates[:3]
+        top_raw = candidates[:top_n]
         best_distance = top_raw[0]["distance_km"] if top_raw else None
         top: List[RecommendationUnit] = []
         for idx, cand in enumerate(top_raw):
@@ -173,6 +176,7 @@ class RecommendationService:
         has_rules: bool,
         compat,
         compat_norm,
+        top_n: int = 3,
     ):
         candidates: list[dict] = []
         for unit in units_state.values():
@@ -201,7 +205,7 @@ class RecommendationService:
                 }
             )
         candidates.sort(key=lambda x: x["distance_km"])
-        top_raw = candidates[:3]
+        top_raw = candidates[:top_n]
         best_distance = top_raw[0]["distance_km"] if top_raw else None
         top: List[RecommendationUnit] = []
         for idx, cand in enumerate(top_raw):

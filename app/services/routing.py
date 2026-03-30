@@ -19,7 +19,14 @@ class RoutingService:
             return raw_distance / 1000.0
         return raw_distance
 
-    def route_between_points_or_none(self, start_lon: float, start_lat: float, end_lon: float, end_lat: float):
+    def route_between_points_or_none(
+        self,
+        start_lon: float,
+        start_lat: float,
+        end_lon: float,
+        end_lat: float,
+        speed_kmph: float | None = None,
+    ):
         start_node = self._snap(start_lon, start_lat)
         end_node = self._snap(end_lon, end_lat)
         result = self.graph.shortest_path_or_none(start_node, end_node)
@@ -27,7 +34,8 @@ class RoutingService:
             return None
         raw_distance, path = result
         distance_km = self._distance_km(raw_distance)
-        time_minutes = int(round(distance_km / settings.avg_speed_kmph * 60.0))
+        speed = speed_kmph if speed_kmph is not None else settings.avg_speed_kmph
+        time_minutes = int(round(distance_km / speed * 60.0))
         coords = self.graph.path_coords(path)
         return {
             "distance_km": round(distance_km, 2),
