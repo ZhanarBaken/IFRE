@@ -13,6 +13,11 @@ make up           # запустить сервис
 # http://127.0.0.1:8000/docs
 ```
 
+**Демо пакетного планирования:**
+```
+http://127.0.0.1:8000/demo/batch-plan?start_date=2025-07-30&end_date=2025-07-31&limit=20&planning_mode=custom&max_total_time_minutes=1692&grouping=true&max_detour_pct=30
+```
+
 ---
 
 ## Возможности
