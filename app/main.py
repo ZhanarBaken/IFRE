@@ -522,7 +522,7 @@ async def demo_batch_plan(
           </select>
           <input type="number" name="max_total_time_minutes" id="customHorizon" placeholder="мин"
             style="width:90px;height:34px;display:{"flex" if pm=="custom" else "none"};box-sizing:border-box;border:1px solid #cbd5e1;border-radius:6px;padding:0 8px;font-size:13px;color:#1f2933;background:#f8fafc;outline:none"
-            min="1" value="">
+            min="1" value="{max_total_time_minutes if max_total_time_minutes is not None else ''}">
         </div>
       </div>
       <div class="field">
